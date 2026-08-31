@@ -78,6 +78,10 @@ Point any tool at your own file with `file="/path/to/yours.mcool"`; omit it to u
 
 More in [`examples/PROMPTS.md`](examples/PROMPTS.md).
 
+## A real session
+
+[`demo/TRANSCRIPT.md`](demo/TRANSCRIPT.md) walks through an actual headless agent session answering exactly that question — chaining `insulation_tads` into `compartments` to find the strongest boundary and place it in a compartment. The machine-captured log it quotes from is committed beside it ([`demo/raw-session.jsonl`](demo/raw-session.jsonl)), and `python scripts/capture_demo.py` reproduces it against your own checkout.
+
 ## What this is, and what it isn't
 
 This is a **demonstration system**: a small, honest, end-to-end example of exposing a real scientific analysis stack to agents over MCP. It runs genuine open2c computations on real published data, and its outputs are the library's own — but it is not a replacement for an interactive analysis environment, and it deliberately ships one chromosome rather than a genome.
@@ -103,7 +107,7 @@ Hi-C analysis over MCP is thinly covered, and neighbours differ in scope rather 
 ## Development
 
 ```bash
-uv run pytest -q      # 42 tests, including ground-truth assertions on the bundled data
+uv run pytest -q      # includes ground-truth assertions against the bundled data
 uv run ruff check .
 ```
 

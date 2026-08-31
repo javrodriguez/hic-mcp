@@ -36,7 +36,7 @@ def tracked_text_files() -> list[Path]:
     out = subprocess.run(
         ["git", "-C", str(REPO), "ls-files"], capture_output=True, text=True, check=True
     ).stdout.split()
-    keep = {".md", ".py", ".toml", ".yml", ".yaml", ".json", ".cff", ".txt"}
+    keep = {".md", ".py", ".toml", ".yml", ".yaml", ".json", ".jsonl", ".cff", ".txt"}
     files = [REPO / p for p in out if Path(p).suffix in keep]
     # this file names the forbidden patterns in order to test for them
     return [f for f in files if f.exists() and f.name != "test_honesty.py"]
@@ -72,12 +72,30 @@ def test_superlative_claims_are_date_scoped():
 
 
 def test_no_local_machine_paths_leak():
+    """Covers the captured session log too - the file most likely to carry one."""
     hits = []
     for f in tracked_text_files():
         for i, line in enumerate(f.read_text(errors="ignore").splitlines(), 1):
-            if re.search(r"/Users/[a-z]", line, re.IGNORECASE):
-                hits.append(f"{f.relative_to(REPO)}:{i}: {line.strip()}")
+            if re.search(r"/Users/[a-z]|/home/[a-z]|cc-socks", line, re.IGNORECASE):
+                hits.append(f"{f.relative_to(REPO)}:{i}: {line.strip()[:160]}")
     assert not hits, "machine-local path in a tracked file:\n" + "\n".join(hits)
+
+
+def test_captured_session_is_a_real_tool_driven_session():
+    """The demo log must show this server actually being called, not a model reciting."""
+    import json
+
+    log = REPO / "demo" / "raw-session.jsonl"
+    records = [json.loads(line) for line in log.read_text().splitlines() if line.strip()]
+    calls = [
+        c["name"]
+        for r in records
+        if r.get("type") == "assistant"
+        for c in r["message"]["content"]
+        if c.get("type") == "tool_use" and str(c.get("name", "")).startswith("mcp__hic-mcp__")
+    ]
+    assert len(calls) >= 2, f"session made too few hic-mcp calls: {calls}"
+    assert any(r.get("mcp_servers") for r in records), "no server connection recorded"
 
 
 def test_readme_structure_and_config_parity():
