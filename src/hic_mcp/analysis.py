@@ -1,0 +1,390 @@
+"""The six analyses, as pure functions over local .cool/.mcool files.
+
+Every function runs the real open2c computation and returns a plain dict that
+names its method, the resolution used, and whether values are ICE-balanced.
+No MCP imports here; anticipated failures raise AnalysisError (or DataError
+from the data helpers) with agent-facing messages.
+"""
+
+import json
+
+import numpy as np
+from cooler import Cooler
+from cooltools import eigs_cis, expected_cis, insulation, virtual4c
+
+from hic_mcp.data import (
+    is_demo,
+    list_resolutions,
+    load_arms_view,
+    load_gc_track,
+    open_matrix,
+    parse_region_checked,
+    resolve_input_path,
+)
+
+
+class AnalysisError(ValueError):
+    """A problem with the requested computation - message is agent-facing."""
+
+
+MATRIX_BIN_CAP = 50  # a full matrix is returned only at or under this many bins per side
+PROFILE_POINT_CAP = 400
+
+
+def _finite(x: float) -> float | None:
+    return round(float(x), 6) if np.isfinite(x) else None
+
+
+def _weights_present(clr: Cooler) -> bool:
+    return "weight" in clr.bins().columns
+
+
+def _check_viewpoint_not_filtered(clr: Cooler, chrom: str, start: int, end: int) -> None:
+    """A viewpoint inside ICE-filtered (NaN-weight) bins has no balanced signal."""
+    w = clr.bins().fetch(f"{chrom}:{start}-{end}")["weight"]
+    if w.isna().all():
+        raise AnalysisError(
+            f"The viewpoint {chrom}:{start:,}-{end:,} falls entirely in ICE-filtered bins "
+            "(low-mappability or centromeric - no balanced signal exists there). "
+            "Choose a viewpoint outside filtered regions; matrix_summary and "
+            "insulation_tads can help locate usable regions."
+        )
+
+
+def matrix_summary(file: str | None = None) -> dict:
+    """What is in this Hi-C file: chromosomes, resolutions, contacts, balancing."""
+    path = resolve_input_path(file)
+    resolutions = list_resolutions(path)
+    per_res = []
+    meta: dict = {}
+    for res in resolutions:
+        clr = open_matrix(path, res, res)
+        info = clr.info
+        per_res.append(
+            {
+                "resolution_bp": res,
+                "bins": int(info["nbins"]),
+                "nonzero_pixels": int(info["nnz"]),
+                "total_contacts": int(info["sum"]),
+                "balanced": _weights_present(clr),
+            }
+        )
+        if not meta:
+            raw = info.get("metadata")
+            if isinstance(raw, str):
+                try:
+                    meta = json.loads(raw)
+                except json.JSONDecodeError:
+                    meta = {"note": raw}
+            elif isinstance(raw, dict):
+                meta = raw
+    clr = open_matrix(path, resolutions[0], resolutions[0])
+    return {
+        "file": path.name,
+        "is_bundled_demo": is_demo(path),
+        "assembly": clr.info.get("genome-assembly") or clr.chromsizes.name or "unknown",
+        "chromosomes": {str(c): int(s) for c, s in clr.chromsizes.items()},
+        "resolutions": per_res,
+        "balanced": all(r["balanced"] for r in per_res),
+        "provenance": meta,
+        "method": "cooler.Cooler.info over every resolution in the file",
+    }
+
+
+def contacts_at_locus(
+    file: str | None = None,
+    region: str = "chr17:50,000,000-52,500,000",
+    region2: str | None = None,
+    resolution: int | None = None,
+    balanced: bool = True,
+) -> dict:
+    """Contact-matrix statistics (and, for small windows, the matrix itself) at a locus."""
+    path = resolve_input_path(file)
+    available = list_resolutions(path)
+    clr0 = open_matrix(path, available[0], available[0])
+    chrom, start, end = parse_region_checked(clr0, region)
+    if region2 is not None:
+        c2, s2, e2 = parse_region_checked(clr0, region2)
+    else:
+        c2, s2, e2 = chrom, start, end
+    span = max(end - start, e2 - s2)
+    if resolution is None:
+        fitting = [r for r in available if span / r <= MATRIX_BIN_CAP]
+        resolution = fitting[0] if fitting else available[-1]
+    clr = open_matrix(path, resolution, resolution)
+    use_weights = balanced and _weights_present(clr)
+    r1 = f"{chrom}:{start}-{end}"
+    r2 = f"{c2}:{s2}-{e2}"
+    raw = clr.matrix(balance=False).fetch(r1, r2)
+    out: dict = {
+        "region": r1,
+        "region2": r2 if region2 is not None else None,
+        "resolution_used": resolution,
+        "shape_bins": list(raw.shape),
+        "raw_contacts_sum": int(np.nansum(raw)),
+        "raw_contacts_max": int(np.nanmax(raw)) if raw.size else 0,
+        "nonzero_fraction": round(float((raw > 0).mean()), 4) if raw.size else 0.0,
+        "balanced": use_weights,
+        "method": "cooler.Cooler.matrix().fetch (raw counts; ICE-balanced values when available)",
+    }
+    if use_weights:
+        bal = clr.matrix(balance=True).fetch(r1, r2)
+        out["balanced_mean"] = _finite(np.nanmean(bal))
+        out["balanced_max"] = _finite(np.nanmax(bal))
+        if max(bal.shape) <= MATRIX_BIN_CAP:
+            out["balanced_matrix"] = [[_finite(v) for v in row] for row in bal]
+        else:
+            out["balanced_matrix"] = None
+            out["note"] = (
+                f"Matrix is {bal.shape[0]}x{bal.shape[1]} bins (cap {MATRIX_BIN_CAP} per side); "
+                "statistics only. Narrow the region or pass a coarser resolution "
+                f"(available: {', '.join(str(r) for r in available)})."
+            )
+    return out
+
+
+def insulation_tads(
+    file: str | None = None,
+    region: str | None = None,
+    resolution: int | None = None,
+    windows_bp: list[int] | None = None,
+    top_n: int = 10,
+) -> dict:
+    """Diamond insulation score and TAD-boundary calls (Crane et al. 2015 method)."""
+    path = resolve_input_path(file)
+    clr = open_matrix(path, resolution, default=10000)
+    if not _weights_present(clr):
+        raise AnalysisError(
+            "This file has no ICE weights ('weight' column); insulation needs a balanced "
+            "matrix. Balance it first with `cooler balance`."
+        )
+    windows = windows_bp or [100_000, 250_000, 500_000]
+    binsize = int(clr.binsize)
+    for w in windows:
+        if w < 3 * binsize:
+            raise AnalysisError(
+                f"Window {w} bp is too small for {binsize} bp bins; "
+                "use a window of at least 3 bins."
+            )
+    ins = insulation(clr, windows, verbose=False)
+    if region is not None:
+        chrom, start, end = parse_region_checked(clr, region)
+        ins = ins[(ins["chrom"] == chrom) & (ins["end"] > start) & (ins["start"] < end)]
+    # rank at the middle window - the classic TAD scale for mammalian 10 kb data;
+    # a boundary that is also called at the flanking windows is the robust kind
+    rank_w = sorted(windows)[len(windows) // 2]
+    strength_col = f"boundary_strength_{rank_w}"
+    bound_cols = {w: f"is_boundary_{w}" for w in windows}
+    counts = {str(w): int(ins[c].sum()) for w, c in bound_cols.items()}
+    called = ins[ins[bound_cols[rank_w]]].copy()
+    called = called.sort_values(strength_col, ascending=False).head(top_n)
+    boundaries = [
+        {
+            "locus": f"{r.chrom}:{int(r.start):,}-{int(r.end):,}",
+            "strength": _finite(getattr(r, strength_col)),
+            "log2_insulation": _finite(getattr(r, f"log2_insulation_score_{rank_w}")),
+            "windows_detected": [w for w in windows if bool(getattr(r, bound_cols[w]))],
+        }
+        for r in called.itertuples()
+    ]
+    return {
+        "region": region,
+        "resolution_used": binsize,
+        "windows_bp": windows,
+        "ranked_by": f"boundary_strength at the {rank_w} bp window",
+        "boundary_counts_per_window": counts,
+        "top_boundaries": boundaries,
+        "balanced": True,
+        "method": "cooltools.insulation (diamond insulation score; Li threshold boundary calls)",
+    }
+
+
+def compartments(
+    file: str | None = None,
+    region: str | None = None,
+    resolution: int | None = None,
+) -> dict:
+    """A/B compartment eigenvector (cis eigendecomposition of the observed/expected map)."""
+    path = resolve_input_path(file)
+    clr = open_matrix(path, resolution, default=100_000)
+    if not _weights_present(clr):
+        raise AnalysisError(
+            "This file has no ICE weights; compartments need a balanced matrix. "
+            "Balance it first with `cooler balance`."
+        )
+    demo = is_demo(path)
+    phasing = view = None
+    if demo and int(clr.binsize) == 100_000:
+        phasing = load_gc_track()
+        view = load_arms_view()
+    eigvals, eigvecs = eigs_cis(clr, phasing_track=phasing, view_df=view, n_eigs=2)
+    sign_convention = (
+        "oriented by the bundled GC track (positive E1 = A = gene-dense/GC-rich)"
+        if phasing is not None
+        else "UNPHASED - the sign of E1 is mathematically arbitrary; supply your own "
+        "orientation (e.g. GC or gene density) before calling A vs B"
+    )
+    out: dict = {
+        "resolution_used": int(clr.binsize),
+        "view": "chr17 p/q arms (bundled)" if view is not None else "whole chromosomes",
+        "sign_convention": sign_convention,
+        "eigenvalues": [
+            {
+                "region": str(r["name"] if "name" in r else r["chrom"]),
+                "eigval1": _finite(r["eigval1"]),
+            }
+            for _, r in eigvals.iterrows()
+        ],
+        "balanced": True,
+        "method": "cooltools.eigs_cis (eigendecomposition of the cis observed/expected matrix)",
+    }
+    vec = eigvecs.dropna(subset=["E1"])
+    if region is not None:
+        chrom, start, end = parse_region_checked(clr, region)
+        sub = vec[(vec["chrom"] == chrom) & (vec["end"] > start) & (vec["start"] < end)]
+        if sub.empty:
+            raise AnalysisError(
+                f"No usable E1 bins in {region} (the region may be entirely ICE-filtered, "
+                "e.g. centromeric)."
+            )
+        mean_e1 = float(sub["E1"].mean())
+        out["region"] = region
+        out["region_mean_E1"] = _finite(mean_e1)
+        out["region_call"] = ("A" if mean_e1 > 0 else "B") if phasing is not None else "unphased"
+        consistency = float((np.sign(sub["E1"]) == np.sign(mean_e1)).mean())
+        out["region_sign_consistency"] = round(consistency, 3)
+        if len(sub) <= 200:
+            out["E1_track"] = [
+                {"start": int(r.start), "E1": _finite(r.E1)} for r in sub.itertuples()
+            ]
+    else:
+        out["genome_A_fraction"] = round(float((vec["E1"] > 0).mean()), 3)
+        out["bins_used"] = int(len(vec))
+    return out
+
+
+def virtual_4c(
+    file: str | None = None,
+    viewpoint: str = "chr17:63,000,000-63,100,000",
+    resolution: int | None = None,
+) -> dict:
+    """A virtual-4C profile: balanced contact frequency of one viewpoint with everything else."""
+    path = resolve_input_path(file)
+    clr = open_matrix(path, resolution, default=10_000)
+    if not _weights_present(clr):
+        raise AnalysisError(
+            "This file has no ICE weights; virtual 4C reports balanced contact frequencies. "
+            "Balance it first with `cooler balance`."
+        )
+    chrom, start, end = parse_region_checked(clr, viewpoint)
+    if end - start < int(clr.binsize):
+        end = start + int(clr.binsize)
+    _check_viewpoint_not_filtered(clr, chrom, start, end)
+    prof = virtual4c(clr, f"{chrom}:{start}-{end}")
+    prof = prof[prof["chrom"] == chrom].reset_index(drop=True)
+    vals = prof["balanced"].to_numpy()
+    pos = prof["start"].to_numpy()
+    center = (start + end) // 2
+    dist = np.abs(pos + int(clr.binsize) // 2 - center)
+    bands = [(0, 100_000), (100_000, 1_000_000), (1_000_000, 5_000_000), (5_000_000, 10_000_000)]
+
+    def _band_label(lo: int, hi: int) -> str:
+        if hi >= 1_000_000:
+            return f"{lo // 1000}kb-{hi // 1_000_000}Mb"
+        return f"{lo // 1000}-{hi // 1000}kb"
+
+    band_means = {}
+    for lo, hi in bands:
+        sel = vals[(dist >= lo) & (dist < hi)]
+        if sel.size and np.isfinite(sel).any():  # skip bands narrower than the binning
+            band_means[_band_label(lo, hi)] = _finite(np.nanmean(sel))
+    finite = np.isfinite(vals)
+    n = int(finite.sum())
+    stride = max(1, n // PROFILE_POINT_CAP)
+    idx = np.where(finite)[0][::stride]
+    return {
+        "viewpoint": f"{chrom}:{start:,}-{end:,}",
+        "resolution_used": int(clr.binsize),
+        "profile_points": [
+            {"start": int(pos[i]), "balanced": _finite(vals[i])} for i in idx
+        ],
+        "profile_note": (
+            f"{n} finite bins; downsampled by taking every {stride}th point. The viewpoint's "
+            "own bin reads NaN by construction (short-range diagonals are masked in balancing)."
+        ),
+        "distance_band_means": band_means,
+        "balanced": True,
+        "method": "cooltools.virtual4c (balanced row extraction at the viewpoint)",
+    }
+
+
+def expected_observed(
+    file: str | None = None,
+    region: str = "chr17:50,000,000-52,500,000",
+    resolution: int | None = None,
+) -> dict:
+    """Distance-expected contact curve and the observed/expected matrix for a region."""
+    path = resolve_input_path(file)
+    clr = open_matrix(path, resolution, default=100_000)
+    if not _weights_present(clr):
+        raise AnalysisError(
+            "This file has no ICE weights; expected/observed uses balanced values. "
+            "Balance it first with `cooler balance`."
+        )
+    chrom, start, end = parse_region_checked(clr, region)
+    demo = is_demo(path)
+    view = load_arms_view() if demo and int(clr.binsize) == 100_000 else None
+    exp = expected_cis(clr, view_df=view, nproc=1)
+    exp = exp[exp["region1"] == exp["region2"]]
+    # P(s) slope over 100 kb - 10 Mb, aggregated across regions
+    curve = exp.groupby("dist_bp", as_index=False)["balanced.avg.smoothed.agg"].mean()
+    curve = curve.rename(columns={"balanced.avg.smoothed.agg": "expected"})
+    sl = curve[(curve["dist_bp"] >= 100_000) & (curve["dist_bp"] <= 10_000_000)].dropna()
+    slope = None
+    if len(sl) > 3:
+        slope = _finite(
+            np.polyfit(np.log10(sl["dist_bp"]), np.log10(sl["expected"]), 1)[0]
+        )
+    # O/E for the region: observed balanced over expected at each diagonal
+    binsize = int(clr.binsize)
+    n_bins = (end - start) // binsize
+    out: dict = {
+        "region": f"{chrom}:{start:,}-{end:,}",
+        "resolution_used": binsize,
+        "ps_slope_100kb_10Mb": slope,
+        "expected_curve_points": [
+            {"dist_bp": int(r.dist_bp), "expected": _finite(r.expected)}
+            for r in curve.dropna().iloc[:: max(1, len(curve) // 100)].itertuples()
+        ],
+        "balanced": True,
+        "method": (
+            "cooltools.expected_cis (smoothed distance-expected); O/E = balanced observed "
+            "over expected at each separation"
+        ),
+    }
+    if n_bins <= MATRIX_BIN_CAP:
+        obs = clr.matrix(balance=True).fetch(f"{chrom}:{start}-{end}")
+        # map the region's chrom to its expected sub-curve (its arm when a view is used)
+        if view is not None:
+            row = view[(view["chrom"] == chrom) & (view["start"] <= start) & (view["end"] >= end)]
+            key = row.iloc[0]["name"] if len(row) else None
+            sub = exp[exp["region1"] == key] if key else exp
+        else:
+            sub = exp[exp["region1"] == chrom]
+        exp_by_diag = sub.set_index("dist")["balanced.avg.smoothed.agg"]
+        oe = np.full_like(obs, np.nan)
+        for d in range(obs.shape[0]):
+            e = exp_by_diag.get(d, np.nan)
+            if np.isfinite(e) and e > 0:
+                diag = np.diagonal(obs, offset=d) / e
+                for k, v in enumerate(diag):
+                    oe[k, k + d] = v
+                    oe[k + d, k] = v
+        out["oe_matrix"] = [[_finite(v) for v in rowv] for rowv in oe]
+    else:
+        out["oe_matrix"] = None
+        out["note"] = (
+            f"Region spans {n_bins} bins (cap {MATRIX_BIN_CAP} per side for the O/E matrix); "
+            "curve and slope only. Narrow the region or use a coarser resolution."
+        )
+    return out
