@@ -57,6 +57,9 @@ class InsulationTads(BaseModel):
     boundary_counts_per_window: dict[str, int]
     top_boundaries: list[Boundary]
     balanced: bool
+    scale_note: str | None = Field(
+        default=None, description="Set when the bin size is too coarse for TAD-scale calls"
+    )
     method: str
 
 
@@ -81,7 +84,12 @@ class Compartments(BaseModel):
     region_call: str | None = None
     region_sign_consistency: float | None = None
     E1_track: list[E1Point] | None = None
-    genome_A_fraction: float | None = None
+    genome_A_fraction: float | None = Field(
+        default=None, description="Only set when the eigenvector is phased; null otherwise"
+    )
+    positive_E1_fraction: float | None = Field(
+        default=None, description="Sign-neutral counterpart reported when unphased"
+    )
     bins_used: int | None = None
     method: str
 
@@ -109,7 +117,15 @@ class ExpectedCurvePoint(BaseModel):
 class ExpectedObserved(BaseModel):
     region: str
     resolution_used: int
-    ps_slope_100kb_10Mb: float | None
+    ps_slope: float | None = Field(
+        default=None, description="log-log slope of P(s) over the range actually fitted"
+    )
+    ps_fit_range_bp: list[int] | None = Field(
+        default=None, description="[min, max] separation the slope was fitted over"
+    )
+    ignored_diagonals: int = Field(
+        description="Diagonals with no expected measurement; O/E is null there"
+    )
     expected_curve_points: list[ExpectedCurvePoint]
     balanced: bool
     oe_matrix: list[list[float | None]] | None = None

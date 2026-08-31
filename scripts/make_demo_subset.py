@@ -142,20 +142,34 @@ def build(source: str, out: str) -> None:
 
 
 def verify_against(rebuilt: str, shipped: str) -> None:
-    """Compare bin and pixel tables of every resolution; exit non-zero on any drift."""
+    """Compare coordinates, pixels AND the recomputed ICE weights at every resolution.
+
+    The weights are the drift-prone artifact - they are recomputed from scratch after
+    subsetting and every balanced analysis depends on them - so the check that licenses
+    the word VERIFIED has to cover them.
+    """
     for res in RESOLUTIONS:
         a = cooler.Cooler(f"{rebuilt}::/resolutions/{res}")
         b = cooler.Cooler(f"{shipped}::/resolutions/{res}")
-        cols = ["chrom", "start", "end"]
-        for name, col_a, col_b in (
-            ("bins", a.bins()[:][cols], b.bins()[:][cols]),
-            ("pixels", a.pixels()[:], b.pixels()[:]),
-        ):
-            cols_a = col_a.select_dtypes(include=[np.number]).to_numpy()
-            cols_b = col_b.select_dtypes(include=[np.number]).to_numpy()
-            if not np.array_equal(cols_a, cols_b):
-                raise SystemExit(f"MISMATCH at {res} bp: {name} tables differ")
-        print(f"{res} bp: bins + pixels identical")
+        bins_a, bins_b = a.bins()[:], b.bins()[:]
+
+        if not (bins_a["chrom"].astype(str) == bins_b["chrom"].astype(str)).all():
+            raise SystemExit(f"MISMATCH at {res} bp: chromosome names differ")
+        for col in ("start", "end"):
+            if not np.array_equal(bins_a[col].to_numpy(), bins_b[col].to_numpy()):
+                raise SystemExit(f"MISMATCH at {res} bp: bin {col} differs")
+
+        pix_a, pix_b = a.pixels()[:], b.pixels()[:]
+        if not np.array_equal(pix_a.to_numpy(), pix_b.to_numpy()):
+            raise SystemExit(f"MISMATCH at {res} bp: pixel tables differ")
+
+        wa, wb = bins_a["weight"].to_numpy(), bins_b["weight"].to_numpy()
+        if not np.array_equal(np.isnan(wa), np.isnan(wb)):
+            raise SystemExit(f"MISMATCH at {res} bp: different bins were ICE-filtered")
+        if not np.allclose(wa, wb, rtol=1e-6, equal_nan=True):
+            worst = np.nanmax(np.abs(wa - wb) / np.abs(wb))
+            raise SystemExit(f"MISMATCH at {res} bp: ICE weights differ (max rel {worst:.2e})")
+        print(f"{res} bp: coordinates + pixels identical, ICE weights match within 1e-6")
     print("VERIFIED: rebuild matches the shipped subset at every resolution")
 
 

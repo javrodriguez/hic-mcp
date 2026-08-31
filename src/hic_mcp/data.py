@@ -91,6 +91,11 @@ def parse_region_checked(clr: cooler.Cooler, region: str) -> tuple[str, int, int
             f"Could not interpret region {region!r} against this file ({e}). "
             f"Use e.g. 'chr17' or 'chr17:1,000,000-2,000,000'. Chromosomes here: {chroms}."
         ) from e
+    if int(end) <= int(start):
+        raise DataError(
+            f"Region {region!r} has zero width (start {int(start):,} is not before end "
+            f"{int(end):,}). Ask for a span of at least one bin."
+        )
     return str(chrom), int(start), int(end)
 
 

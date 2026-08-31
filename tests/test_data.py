@@ -72,6 +72,8 @@ def test_region_errors_are_agent_readable():
         parse_region_checked(clr, "chr2:1-1000")
     with pytest.raises(DataError):
         parse_region_checked(clr, "chr17:90,000,000-95,000,000")  # beyond chrom end
+    with pytest.raises(DataError, match="zero width"):
+        parse_region_checked(clr, "chr17:50,000,000-50,000,000")
 
 
 def test_data_dir_env_override(monkeypatch, tmp_path):

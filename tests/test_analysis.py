@@ -99,8 +99,18 @@ def test_insulation_strongest_boundary_ground_truth():
 def test_insulation_region_filter_and_window_guard():
     out = insulation_tads(region="chr17:65,000,000-67,000,000", top_n=3)
     assert any(b["locus"] == BOUNDARY_LOCUS for b in out["top_boundaries"])
-    with pytest.raises(AnalysisError, match="too small"):
+    with pytest.raises(AnalysisError, match="at least 3 bins"):
         insulation_tads(windows_bp=[20_000])
+
+
+def test_insulation_runs_at_every_advertised_resolution():
+    """Windows scale with bin size, so no resolution the file offers is a dead end."""
+    for res in (10_000, 100_000, 1_000_000):
+        out = insulation_tads(resolution=res, top_n=1)
+        assert out["windows_bp"] == [10 * res, 25 * res, 50 * res]
+        assert out["top_boundaries"], res
+        # a coarse bin cannot resolve TADs, and the output says so rather than implying it
+        assert (out.get("scale_note") is not None) == (res > 100_000)
 
 
 def test_insulation_needs_weights(tiny_unbalanced_cool):
@@ -148,13 +158,21 @@ def test_compartments_genome_summary():
     assert out["bins_used"] > 500
 
 
+def test_compartments_never_claims_an_A_fraction_when_unphased():
+    """An arbitrary sign cannot support an 'A fraction' - the field must stay null."""
+    out = compartments(resolution=1_000_000)  # phasing track exists only at 100 kb
+    assert "UNPHASED" in out["sign_convention"]
+    assert out["genome_A_fraction"] is None
+    assert 0.0 < out["positive_E1_fraction"] < 1.0
+
+
 # --- virtual_4c ------------------------------------------------------------
 
 
 def test_virtual4c_ground_truth_shape():
     out = virtual_4c(viewpoint="chr17:63,000,000-63,100,000")  # default 10 kb
     bands = out["distance_band_means"]
-    assert set(bands) == {"0-100kb", "100kb-1Mb", "1000kb-5Mb", "5000kb-10Mb"}
+    assert set(bands) == {"0kb-100kb", "100kb-1Mb", "1Mb-5Mb", "5Mb-10Mb"}
     vals = list(bands.values())
     assert all(v is not None for v in vals)
     assert vals == sorted(vals, reverse=True)  # decaying distance-band means
@@ -164,9 +182,22 @@ def test_virtual4c_ground_truth_shape():
 
 def test_virtual4c_coarse_resolution_drops_empty_band():
     out = virtual_4c(viewpoint="chr17:63,000,000-63,100,000", resolution=100_000)
-    assert "0-100kb" not in out["distance_band_means"]  # narrower than one bin
+    assert "0kb-100kb" not in out["distance_band_means"]  # narrower than one bin
     vals = list(out["distance_band_means"].values())
     assert vals == sorted(vals, reverse=True)
+
+
+def test_virtual4c_viewpoint_at_the_chromosome_end():
+    """Padding a sub-bin viewpoint must not push the request past the chromosome.
+
+    chr17's final bins are ICE-filtered (telomeric), so the honest answer there is the
+    clear filtered-bin message - never an out-of-bounds crash from the padding itself.
+    """
+    with pytest.raises(AnalysisError, match="ICE-filtered"):
+        virtual_4c(viewpoint="chr17:83,250,000-83,257,441", resolution=10_000)
+    # the last usable bin, one bin short of the end, still answers
+    out = virtual_4c(viewpoint="chr17:83,200,000-83,210,000", resolution=10_000)
+    assert out["profile_points"]
 
 
 def test_virtual4c_filtered_viewpoint_is_a_clear_error():
@@ -180,25 +211,50 @@ def test_virtual4c_filtered_viewpoint_is_a_clear_error():
 
 
 def test_expected_ps_slope_ground_truth():
-    out = expected_observed(region=A_BLOCK)
-    assert out["ps_slope_100kb_10Mb"] is not None
-    assert -1.6 <= out["ps_slope_100kb_10Mb"] <= -0.9  # measured ~ -1.245
+    """The slope is fitted only over diagonals cooltools actually measured."""
+    out = expected_observed(region=A_BLOCK)  # default 100 kb
+    assert out["ignored_diagonals"] == 2
+    assert out["ps_fit_range_bp"] == [200_000, 10_000_000]  # starts past the masked head
+    assert out["ps_slope"] == pytest.approx(-1.2254, rel=0.05)
     assert len(out["expected_curve_points"]) > 20
+    # the masked head must not appear in the reported curve
+    assert min(p["dist_bp"] for p in out["expected_curve_points"]) >= 200_000
 
 
-def test_expected_oe_matrix_for_small_region():
+def test_expected_ps_slope_is_negative_at_every_resolution():
+    """Contact frequency falls with distance; a positive slope means a contaminated fit."""
+    for res, expected in ((10_000, -1.2416), (100_000, -1.2254), (1_000_000, -1.0547)):
+        out = expected_observed(region=A_BLOCK, resolution=res)
+        assert out["ps_slope"] == pytest.approx(expected, rel=0.08), res
+        assert out["ps_fit_range_bp"][0] >= 2 * res
+
+
+def test_expected_oe_matrix_is_centred_on_one_per_diagonal():
+    """O/E is ~1 by construction: assert it diagonal by diagonal, not on a pooled median."""
     out = expected_observed(region="chr17:50,000,000-52,500,000")
     m = out["oe_matrix"]
     assert m is not None and len(m) == 25
-    flat = [v for row in m for v in row if v is not None]
-    assert len(flat) > 100 and all(v >= 0 for v in flat)
-    med = float(np.median(flat))
-    assert 0.2 < med < 5.0  # O/E is centred near 1 by construction
+    arr = np.array([[np.nan if v is None else v for v in row] for row in m])
+    # the unmeasured head is null, not an invented ratio
+    for d in range(out["ignored_diagonals"]):
+        assert np.isnan(np.diagonal(arr, offset=d)).all(), f"diagonal {d} should be null"
+    assert "null by construction" in out["note"]
+    for d in range(out["ignored_diagonals"], 6):
+        vals = np.diagonal(arr, offset=d)
+        vals = vals[np.isfinite(vals)]
+        assert vals.size > 5
+        assert 0.3 < float(np.median(vals)) < 3.0, f"diagonal {d} median off 1"
+    assert np.nanmax(arr) < 10.0  # no order-of-magnitude artifact anywhere
 
 
 def test_expected_large_region_stats_only():
     out = expected_observed(region="chr17", resolution=100_000)
     assert out["oe_matrix"] is None and "cap" in out["note"]
+
+
+def test_expected_region_straddling_the_centromere_is_a_clear_error():
+    with pytest.raises(AnalysisError, match="not contained in a single chromosome arm"):
+        expected_observed(region="chr17:20,000,000-25,000,000")
 
 
 # --- every tool names its method (honest-output invariant) ------------------

@@ -79,6 +79,38 @@ async def test_anticipated_errors_reach_the_agent():
         assert "Chromosomes here" in r2.content[0].text
 
 
+async def test_no_bare_error_ever_reaches_the_agent():
+    """Every reachable failure names a reason the model can act on."""
+    calls = [
+        ("expected_observed", {"region": "chr17:20,000,000-25,000,000"}),  # spans the arms
+        ("contacts_at_locus", {"region": "chr17:50,000,000-50,000,000"}),  # zero width
+        ("virtual_4c", {"viewpoint": "chr17:24,000,000-24,010,000"}),  # filtered
+        ("insulation_tads", {"windows_bp": [1000]}),  # window under 3 bins
+    ]
+    async with Client(server) as client:
+        for name, args in calls:
+            r = await client.call_tool(name, args)
+            assert r.is_error, f"{name} should have failed"
+            text = r.content[0].text
+            assert text.strip() != f"Error executing tool {name}", f"{name} gave a bare error"
+            assert len(text) > 60, f"{name} error too terse to act on: {text}"
+
+
+async def test_unexpected_failures_are_wrapped_not_bare(monkeypatch):
+    """The backstop turns a genuine bug into something the agent can still read."""
+    from hic_mcp import analysis
+
+    def boom(**kwargs):
+        raise RuntimeError("simulated internal defect")
+
+    monkeypatch.setattr(analysis, "matrix_summary", boom)
+    async with Client(server) as client:
+        r = await client.call_tool("matrix_summary", {})
+        assert r.is_error
+        assert "simulated internal defect" in r.content[0].text
+        assert "bug in hic-mcp" in r.content[0].text
+
+
 async def test_real_stdio_subprocess_roundtrip():
     """The packaged entry point answers over stdio, as a real MCP client launches it."""
     params = StdioServerParameters(

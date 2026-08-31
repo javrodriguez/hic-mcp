@@ -43,6 +43,13 @@ def _run(fn, /, **kwargs):
         return fn(**kwargs)
     except (DataError, AnalysisError) as e:
         raise ToolError(str(e)) from e
+    except Exception as e:  # backstop: an agent must never receive a reason-less failure
+        args = ", ".join(f"{k}={v!r}" for k, v in kwargs.items() if v is not None)
+        raise ToolError(
+            f"{fn.__name__} failed unexpectedly on ({args}): {type(e).__name__}: {e}. "
+            "This is a bug in hic-mcp, not in your request - try a different region or "
+            "resolution, and please report it."
+        ) from e
 
 
 @server.tool()
@@ -85,12 +92,21 @@ def insulation_tads(
     ] = None,
     file: _FILE = None,
     resolution: _RESOLUTION = None,
+    windows_bp: Annotated[
+        list[int] | None,
+        Field(description="Diamond window sizes in bp; omit to scale with the bin size"),
+    ] = None,
     top_n: Annotated[int, Field(description="How many strongest boundaries to report")] = 10,
 ) -> models.InsulationTads:
     """Insulation score and TAD-boundary calls (diamond insulation, Crane et al. 2015)."""
     return models.InsulationTads(
         **_run(
-            analysis.insulation_tads, file=file, region=region, resolution=resolution, top_n=top_n
+            analysis.insulation_tads,
+            file=file,
+            region=region,
+            resolution=resolution,
+            windows_bp=windows_bp,
+            top_n=top_n,
         )
     )
 
