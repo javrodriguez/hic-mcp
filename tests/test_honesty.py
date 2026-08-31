@@ -26,15 +26,24 @@ FORBIDDEN = {
 # are allowed only inside an explicitly dated form. Ordinary ordinal English ("the first
 # two diagonals") is not a claim and must not trip this.
 SUPERLATIVE = (
-    r"\b(the first|the only|world'?s first)\b[^.\n]{0,60}"
-    r"\b(MCP|server|tool|package|library|implementation)\b"
+    r"\b(the first|the only|world'?s first)\b[^.\n]{0,40}"
+    r"\b(MCP|server|tool|package|library|implementation)\b(?!'s)"  # not "the first tool's ..."
 )
 DATE_SCOPED = r"as of \d{4}"
 
 
 def tracked_text_files() -> list[Path]:
+    """Tracked files AND new files not yet committed.
+
+    Untracked-but-not-ignored files are included deliberately: a sweep that only saw
+    committed files would pass locally on a brand-new file and only fail later in CI,
+    which is exactly how these checks were first caught out.
+    """
     out = subprocess.run(
-        ["git", "-C", str(REPO), "ls-files"], capture_output=True, text=True, check=True
+        ["git", "-C", str(REPO), "ls-files", "--cached", "--others", "--exclude-standard"],
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.split()
     keep = {".md", ".py", ".toml", ".yml", ".yaml", ".json", ".jsonl", ".cff", ".txt"}
     files = [REPO / p for p in out if Path(p).suffix in keep]
@@ -76,7 +85,8 @@ def test_no_local_machine_paths_leak():
     hits = []
     for f in tracked_text_files():
         for i, line in enumerate(f.read_text(errors="ignore").splitlines(), 1):
-            if re.search(r"/Users/[a-z]|/home/[a-z]|cc-socks", line, re.IGNORECASE):
+            # a real home path, not a pattern that merely mentions one
+            if re.search(r"/Users/[a-z]|/home/[a-z]", line, re.IGNORECASE):
                 hits.append(f"{f.relative_to(REPO)}:{i}: {line.strip()[:160]}")
     assert not hits, "machine-local path in a tracked file:\n" + "\n".join(hits)
 
