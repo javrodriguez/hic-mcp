@@ -1,9 +1,10 @@
 # HiC-MCP
 
-Hi-C / 3D-chromatin analysis for AI agents: an [MCP](https://modelcontextprotocol.io) server exposing the [open2c](https://open2c.github.io/) stack ([cooler](https://github.com/open2c/cooler), [cooltools](https://github.com/open2c/cooltools)) as tools over local `.mcool`/`.cool` contact-matrix files.
-Every tool runs the real computation on real data — nothing is mocked.
+[![CI](https://github.com/javrodriguez/hic-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/javrodriguez/hic-mcp/actions/workflows/ci.yml)
 
-> **Status: under construction.** The analysis tools land in the next commits; this section is removed when they do.
+**Hi-C / 3D-chromatin analysis for AI agents.** An [MCP](https://modelcontextprotocol.io) server that exposes the [open2c](https://open2c.github.io/) stack ([cooler](https://github.com/open2c/cooler), [cooltools](https://github.com/open2c/cooltools)) as tools over local `.mcool`/`.cool` contact matrices — TAD boundaries, A/B compartments, virtual 4C, observed/expected, and more.
+
+**A real 6.8 MB Hi-C dataset ships with it**, so the quickstart works offline with no API keys, no accounts, and no data of your own. Every tool runs the real computation; nothing is mocked.
 
 ## Quickstart
 
@@ -13,7 +14,7 @@ cd hic-mcp
 uv sync
 ```
 
-Paste into `claude_desktop_config.json` (Claude Desktop):
+Then add it to your MCP client. **Claude Desktop** — paste into `claude_desktop_config.json`:
 
 ```json
 {
@@ -26,19 +27,88 @@ Paste into `claude_desktop_config.json` (Claude Desktop):
 }
 ```
 
-Or with Claude Code:
+**Claude Code** — one line:
 
 ```bash
 claude mcp add hic-mcp -- uv --directory /ABS/PATH/TO/hic-mcp run hic-mcp
 ```
 
-Claude Desktop launches without a login-shell `PATH` on some systems — if the server does not appear, use the absolute path to `uv` (`which uv`) as `"command"`.
+Now ask your agent: *"Find the strongest TAD boundary in the demo Hi-C data, then tell me which compartment it sits in."*
 
-## What this is
+## What that actually returns
 
-A demonstration system for agent-driven 3D-genome analysis, built on the official MCP Python SDK.
-It is not a substitute for a full interactive analysis environment.
+Real output from the bundled data — `insulation_tads(region="chr17:65,000,000-67,000,000", top_n=2)`:
+
+```json
+{
+  "resolution_used": 10000,
+  "windows_bp": [100000, 250000, 500000],
+  "ranked_by": "boundary_strength at the 250000 bp window",
+  "top_boundaries": [
+    {"locus": "chr17:66,180,000-66,190,000", "strength": 2.762923,
+     "log2_insulation": -1.658919, "windows_detected": [100000, 250000, 500000]},
+    {"locus": "chr17:66,680,000-66,690,000", "strength": 1.726271,
+     "log2_insulation": -1.123265, "windows_detected": [100000, 250000]}
+  ]
+}
+```
+
+Every response names the method it used, the resolution it ran at, and whether values are ICE-balanced — so an agent can quote the result without overstating it.
+
+## The tools
+
+| Tool | What it computes | Method |
+|---|---|---|
+| `matrix_summary` | Chromosomes, resolutions, contact totals, balancing status, provenance | `cooler.Cooler.info` across every resolution |
+| `contacts_at_locus` | Contact statistics at a locus or between two loci; the balanced matrix for small windows | `cooler.Cooler.matrix().fetch` |
+| `insulation_tads` | Insulation score and TAD-boundary calls, across several diamond windows | `cooltools.insulation` (Crane et al. 2015; Li-threshold calls) |
+| `compartments` | A/B compartment eigenvector, GC-phased so the sign is meaningful | `cooltools.eigs_cis` on the cis observed/expected map |
+| `virtual_4c` | Contact profile of one viewpoint against its chromosome | `cooltools.virtual4c` |
+| `expected_observed` | Distance-expected contact curve, P(s) slope, and the O/E matrix | `cooltools.expected_cis` |
+
+Point any tool at your own file with `file="/path/to/yours.mcool"`; omit it to use the bundled demo.
+
+## Example prompts
+
+- *"What's in the demo Hi-C file — which chromosomes and resolutions?"*
+- *"Call TAD boundaries on chr17 between 65 and 67 Mb and rank them by strength."*
+- *"Is chr17:50.1-51.1 Mb in the A or B compartment, and how confident is that call?"*
+- *"Plot me the contact-decay curve — what's the P(s) slope?"*
+- *"Run a virtual 4C from chr17:63 Mb and describe how contacts fall off with distance."*
+
+More in [`examples/PROMPTS.md`](examples/PROMPTS.md).
+
+## What this is, and what it isn't
+
+This is a **demonstration system**: a small, honest, end-to-end example of exposing a real scientific analysis stack to agents over MCP. It runs genuine open2c computations on real published data, and its outputs are the library's own — but it is not a replacement for an interactive analysis environment, and it deliberately ships one chromosome rather than a genome.
+
+Where a result can't be trusted, the tools say so rather than returning a number: a viewpoint in an ICE-filtered region raises a clear error instead of a null profile, the first two diagonals of an O/E matrix come back null because `cooltools` does not measure expected there, an unphased eigenvector reports a sign-neutral fraction instead of claiming an "A compartment" share, and a bin size too coarse for TADs says so in the response.
+
+## Data
+
+Derived subset (chr17, hg38) of HFFc6 Micro-C generated by the Dekker and Rando labs (UMass Chan) for the NIH 4D Nucleome Network (1U54DK107980-01), accession [`4DNESWST3UBH`](https://data.4dnucleome.org/experiment-set-replicates/4DNESWST3UBH/), obtained via the Open2C [cooltools](https://github.com/open2c/cooltools) test-data registry ([osf.io/3h9js](https://osf.io/3h9js/)).
+Cite Krietenstein et al., *Mol Cell* 78:554-565 (2020), doi:[10.1016/j.molcel.2020.03.003](https://doi.org/10.1016/j.molcel.2020.03.003); 4DN White Paper doi:[10.1038/nature23884](https://doi.org/10.1038/nature23884); 4DN Portal doi:[10.1038/s41467-022-29697-4](https://doi.org/10.1038/s41467-022-29697-4).
+Redistributed under the [4DN Data Release and Use Policy](https://github.com/4dn-dcic/4dn-policies/blob/master/4dn-data-release-and-use-policy.md).
+Full provenance, the rebuild script, and the measured landmarks the test suite asserts against: [`data/PROVENANCE.md`](data/PROVENANCE.md).
+
+## Related work
+
+Hi-C analysis over MCP is thinly covered, and neighbours differ in scope rather than quality:
+
+- [`zhouhufeng/IGVFagent`](https://github.com/zhouhufeng/IGVFagent) — a 161-tool IGVF/ENCODE agent whose MCP surface includes three Hi-C tools (contact heatmap, Crane insulation, loop QC) built on cooler and hic-straw; it does not expose the cooltools analysis surface (compartments, expected curves, pileups).
+- [`aidenlab/juicebox-mcp`](https://github.com/aidenlab/juicebox-mcp) — Hi-C contact-matrix visualization over MCP.
+- [`ammawla/encode-toolkit`](https://github.com/ammawla/encode-toolkit) — discovery and QC of ENCODE Hi-C experiments; no contact-matrix operations.
+- [`GPTomics/bioSkills`](https://github.com/GPTomics/bioSkills) — a broad Hi-C skill set (including cooltools-based compartment and TAD analysis) as Claude Agent Skills rather than an MCP server.
+
+## Development
+
+```bash
+uv run pytest -q      # 42 tests, including ground-truth assertions on the bundled data
+uv run ruff check .
+```
+
+The test suite asserts known measured results — a specific boundary locus, compartment signs on named blocks, the P(s) slope, exact contact totals — so a regression that changes the science fails the build rather than passing quietly. Tests run with sockets blocked, proving the demo needs no network.
 
 ## License
 
-MIT (source code only — bundled data carries its own terms; see `LICENSE`).
+MIT — **source code only**. The bundled dataset carries its own terms; see [`LICENSE`](LICENSE) and [`data/PROVENANCE.md`](data/PROVENANCE.md).

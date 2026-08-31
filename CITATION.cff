@@ -1,0 +1,9 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "HiC-MCP"
+abstract: "An MCP server exposing the open2c Hi-C analysis stack (cooler, cooltools) as tools for AI agents, over local .mcool/.cool contact matrices."
+authors:
+  - family-names: "Rodriguez Hernaez"
+    given-names: "Javier"
+repository-code: "https://github.com/javrodriguez/hic-mcp"
+license: MIT
