@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "hic-mcp": {
+      "command": "uv",
+      "args": ["--directory", "/ABS/PATH/TO/hic-mcp", "run", "hic-mcp"]
+    }
+  }
+}
