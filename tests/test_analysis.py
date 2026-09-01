@@ -104,13 +104,31 @@ def test_insulation_region_filter_and_window_guard():
 
 
 def test_insulation_runs_at_every_advertised_resolution():
-    """Windows scale with bin size, so no resolution the file offers is a dead end."""
-    for res in (10_000, 100_000, 1_000_000):
+    """Every resolution is usable, and TAD-scale windows are kept wherever bins allow."""
+    expected_windows = {
+        10_000: [100_000, 250_000, 500_000],  # classic TAD scale
+        100_000: [300_000, 500_000, 1_000_000],  # still TAD scale: 3 bins is 300 kb
+        1_000_000: [3_000_000, 5_000_000, 10_000_000],  # too coarse - must warn
+    }
+    for res, windows in expected_windows.items():
         out = insulation_tads(resolution=res, top_n=1)
-        assert out["windows_bp"] == [10 * res, 25 * res, 50 * res]
+        assert out["windows_bp"] == windows, res
         assert out["top_boundaries"], res
-        # a coarse bin cannot resolve TADs, and the output says so rather than implying it
-        assert (out.get("scale_note") is not None) == (res > 100_000)
+        assert (out.get("scale_note") is not None) == (min(windows) > 500_000), res
+
+
+def test_insulation_at_100kb_stays_at_tad_scale():
+    """At 100 kb bins the windows must stay TAD-scale, not drift to compartment scale.
+
+    Ranking is deliberately not asserted here: chr17:51.2 Mb (the documented A/B flip)
+    is a genuinely strong insulation feature and competes for the top slot within 0.3%,
+    so pinning an order would be a brittle test of real biology rather than of the code.
+    """
+    out = insulation_tads(resolution=100_000, top_n=3)
+    assert max(out["windows_bp"]) <= 1_000_000
+    assert out.get("scale_note") is None  # TAD scale is achievable here, so no warning
+    coarse = insulation_tads(resolution=1_000_000, top_n=1)
+    assert coarse["scale_note"] is not None  # but not here
 
 
 def test_insulation_needs_weights(tiny_unbalanced_cool):
@@ -177,12 +195,25 @@ def test_virtual4c_ground_truth_shape():
     assert all(v is not None for v in vals)
     assert vals == sorted(vals, reverse=True)  # decaying distance-band means
     assert all(p["balanced"] is not None for p in out["profile_points"])
-    assert "NaN by construction" in out["profile_note"]
+    assert "genuine zeros" in out["profile_note"]
+    # every band must average over real bins, and mappable zero-contact bins count
+    assert out["distance_band_bins"]["5Mb-10Mb"] == 1000
+    assert out["distance_band_means"]["5Mb-10Mb"] == pytest.approx(0.000146, rel=0.05)
+
+
+def test_virtual4c_counts_genuine_zeros_not_just_contacted_bins():
+    """Dropping mappable zero-contact bins would flatten the decay this tool describes."""
+    out = virtual_4c(viewpoint="chr17:63,000,000-63,100,000")
+    far = out["distance_band_means"]["5Mb-10Mb"]
+    near = out["distance_band_means"]["1Mb-5Mb"]
+    # with zeros dropped these collapse together; with zeros counted they stay apart
+    assert near > 1.5 * far
 
 
 def test_virtual4c_coarse_resolution_drops_empty_band():
     out = virtual_4c(viewpoint="chr17:63,000,000-63,100,000", resolution=100_000)
-    assert "0kb-100kb" not in out["distance_band_means"]  # narrower than one bin
+    # only the viewpoint's own (deliberately masked) bin falls in that band here
+    assert "0kb-100kb" not in out["distance_band_means"]
     vals = list(out["distance_band_means"].values())
     assert vals == sorted(vals, reverse=True)
 
@@ -248,8 +279,28 @@ def test_expected_oe_matrix_is_centred_on_one_per_diagonal():
 
 
 def test_expected_large_region_stats_only():
-    out = expected_observed(region="chr17", resolution=100_000)
+    out = expected_observed(region="chr17:27,100,000-83,257,441", resolution=100_000)
     assert out["oe_matrix"] is None and "cap" in out["note"]
+
+
+def test_expected_curve_is_scoped_to_the_region_not_the_whole_file():
+    """A slope labelled with the caller's region must describe that region's arm."""
+    p_arm = expected_observed(region="chr17:5,000,000-7,500,000")
+    q_arm = expected_observed(region="chr17:50,000,000-52,500,000")
+    assert p_arm["view"].startswith("chr17p")
+    assert q_arm["view"].startswith("chr17q")
+    assert p_arm["ps_slope"] != q_arm["ps_slope"]
+    assert p_arm["ps_slope"] == pytest.approx(-1.1625, rel=0.05)
+    assert q_arm["ps_slope"] == pytest.approx(-1.2407, rel=0.05)
+    assert "not only the requested region" in p_arm["curve_scope"]
+
+
+def test_expected_curve_tail_is_not_flattened_by_rounding():
+    """Six-decimal rounding collapsed a decade of decay into one repeated constant."""
+    pts = expected_observed(region=A_BLOCK, resolution=10_000)["expected_curve_points"]
+    tail = [p["expected"] for p in pts[-10:] if p["expected"] is not None]
+    assert len(set(tail)) == len(tail), f"curve tail is flat: {tail}"
+    assert tail == sorted(tail, reverse=True) or tail[0] > tail[-1]
 
 
 def test_expected_region_straddling_the_centromere_is_a_clear_error():

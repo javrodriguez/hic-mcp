@@ -30,11 +30,18 @@ class AnalysisError(ValueError):
 MATRIX_BIN_CAP = 50  # a full matrix is returned only at or under this many bins per side
 PROFILE_POINT_CAP = 400
 IGNORE_DIAGS = 2  # cooltools' expected default: the first 2 diagonals carry no measurement
-INSULATION_WINDOW_BINS = (10, 25, 50)  # scaled by bin size -> 100/250/500 kb at 10 kb bins
+CLASSIC_TAD_WINDOWS = (100_000, 250_000, 500_000)  # mammalian TAD scale
+COARSE_WINDOW_BINS = (3, 5, 10)  # fallback multipliers when bins are too big for the above
+MIN_BINS_FOR_CONSISTENCY = 3  # below this a sign-consistency figure is vacuous
 
 
 def _finite(x: float) -> float | None:
-    return round(float(x), 6) if np.isfinite(x) else None
+    """Round to 6 SIGNIFICANT figures, not 6 decimals.
+
+    Contact frequencies span decades; fixed-decimal rounding would flatten the tail of
+    a P(s) curve into a run of identical constants.
+    """
+    return float(f"{float(x):.6g}") if np.isfinite(x) else None
 
 
 def _weights_present(clr: Cooler) -> bool:
@@ -162,9 +169,15 @@ def insulation_tads(
             "matrix. Balance it first with `cooler balance`."
         )
     binsize = int(clr.binsize)
-    # defaults scale with the bin size, so every resolution the file offers is usable
-    # (10/25/50 bins reproduces the classic 100/250/500 kb windows at 10 kb bins)
-    windows = windows_bp or [n * binsize for n in INSULATION_WINDOW_BINS]
+    # Prefer the classic TAD-scale windows whenever the bin size can carry them (a
+    # diamond needs >= 3 bins); only fall back to bin-scaled windows on coarse data,
+    # so a 100 kb file still gets TAD-scale calls rather than compartment-scale ones.
+    if windows_bp:
+        windows = windows_bp
+    elif 3 * binsize <= min(CLASSIC_TAD_WINDOWS):
+        windows = list(CLASSIC_TAD_WINDOWS)
+    else:
+        windows = [n * binsize for n in COARSE_WINDOW_BINS]
     for w in windows:
         if w < 3 * binsize:
             raise AnalysisError(
@@ -203,11 +216,12 @@ def insulation_tads(
         "balanced": True,
         "method": "cooltools.insulation (diamond insulation score; Li threshold boundary calls)",
     }
-    if binsize > 100_000:
+    if min(windows) > max(CLASSIC_TAD_WINDOWS):
         out["scale_note"] = (
-            f"At {binsize:,} bp bins the smallest usable window is {windows[0]:,} bp, far "
-            "above the ~100 kb-1 Mb scale of mammalian TADs: these are megabase-scale "
-            "insulation features, not TAD boundaries. Use a finer resolution for TAD calls."
+            f"The smallest window here is {min(windows):,} bp, above the ~100-500 kb scale "
+            "of mammalian TADs: these are large-scale insulation features (often "
+            "compartment boundaries), not TAD boundaries. Use a finer resolution, or pass "
+            "windows_bp, for TAD calls."
         )
     return out
 
@@ -230,7 +244,7 @@ def compartments(
     if demo and int(clr.binsize) == 100_000:
         phasing = load_gc_track()
         view = load_arms_view()
-    eigvals, eigvecs = eigs_cis(clr, phasing_track=phasing, view_df=view, n_eigs=2)
+    eigvals, eigvecs = eigs_cis(clr, phasing_track=phasing, view_df=view, n_eigs=3)
     sign_convention = (
         "oriented by the bundled GC track (positive E1 = A = gene-dense/GC-rich)"
         if phasing is not None
@@ -245,9 +259,20 @@ def compartments(
             {
                 "region": str(r["name"] if "name" in r else r["chrom"]),
                 "eigval1": _finite(r["eigval1"]),
+                # raw eigenvalues scale with region size, so a bigger arm always looks
+                # "stronger"; the share is the comparable number
+                "variance_share": _finite(
+                    abs(r["eigval1"])
+                    / sum(abs(r[f"eigval{i}"]) for i in (1, 2, 3))
+                ),
             }
             for _, r in eigvals.iterrows()
         ],
+        "eigenvalue_note": (
+            "eigval1 is unnormalised and grows with region size, so a longer arm always "
+            "looks 'stronger'. variance_share is eigval1 as a fraction of the top three "
+            "eigenvalues' absolute weight - use that to compare regions."
+        ),
         "balanced": True,
         "method": "cooltools.eigs_cis (eigendecomposition of the cis observed/expected matrix)",
     }
@@ -264,12 +289,36 @@ def compartments(
         out["region"] = region
         out["region_mean_E1"] = _finite(mean_e1)
         out["region_call"] = ("A" if mean_e1 > 0 else "B") if phasing is not None else "unphased"
-        consistency = float((np.sign(sub["E1"]) == np.sign(mean_e1)).mean())
-        out["region_sign_consistency"] = round(consistency, 3)
-        if len(sub) <= 200:
+        out["bins_used"] = int(len(sub))
+        # a single bin is trivially "100% consistent with itself"; reporting that as
+        # confidence invites an agent to call a knife-edge locus unambiguous
+        if len(sub) >= MIN_BINS_FOR_CONSISTENCY:
+            consistency = float((np.sign(sub["E1"]) == np.sign(mean_e1)).mean())
+            out["region_sign_consistency"] = round(consistency, 3)
+        else:
+            out["region_sign_consistency"] = None
+            out["confidence_note"] = (
+                f"This region covers {len(sub)} bin(s) at {int(clr.binsize):,} bp, too few "
+                "for a sign-consistency figure. The flanking track below shows whether the "
+                "call is stable or sits on a compartment transition - read it before "
+                "describing this locus as clearly A or B."
+            )
+        # always give the neighbourhood: a compartment call means little without the
+        # bins either side of it
+        flank = max(3, MIN_BINS_FOR_CONSISTENCY)
+        lo = start - flank * int(clr.binsize)
+        hi = end + flank * int(clr.binsize)
+        ctx = vec[(vec["chrom"] == chrom) & (vec["end"] > lo) & (vec["start"] < hi)]
+        if len(ctx) <= 200:
             out["E1_track"] = [
-                {"start": int(r.start), "E1": _finite(r.E1)} for r in sub.itertuples()
+                {"start": int(r.start), "E1": _finite(r.E1)} for r in ctx.itertuples()
             ]
+            signs = np.sign(ctx["E1"].to_numpy())
+            if len(set(signs[signs != 0])) > 1:
+                out["transition_note"] = (
+                    "E1 changes sign within the flanking window: this locus is at or near "
+                    "a compartment transition, so a single-region A/B label understates it."
+                )
     else:
         positive_fraction = round(float((vec["E1"] > 0).mean()), 3)
         if phasing is not None:
@@ -316,11 +365,32 @@ def virtual_4c(
     def _band_label(lo: int, hi: int) -> str:
         return f"{_bound(lo)}-{_bound(hi)}"
 
+    # A NaN here means one of two different things, and averaging them together is
+    # wrong: an ICE-filtered bin carries no measurement (exclude it), while a mappable
+    # bin with no contacts is a genuine zero (include it, or the decay looks flatter
+    # than it is).
+    all_bins = clr.bins()[:]
+    weights = all_bins["weight"].to_numpy()
+    mappable = ~np.isnan(weights)
+    # the viewpoint's own bins are masked by cooltools deliberately (self-contact), so
+    # they are neither a measurement nor a genuine zero - exclude them entirely
+    own = (
+        (all_bins["chrom"].astype(str).to_numpy() == chrom)
+        & (all_bins["end"].to_numpy() > start)
+        & (all_bins["start"].to_numpy() < end)
+    )
+    usable = np.where(np.isnan(vals) & mappable, 0.0, vals)
+
     band_means = {}
+    band_bins = {}
     for lo, hi in bands:
-        sel = vals[(dist >= lo) & (dist < hi)]
-        if sel.size and np.isfinite(sel).any():  # skip bands narrower than the binning
-            band_means[_band_label(lo, hi)] = _finite(np.nanmean(sel))
+        in_band = (dist >= lo) & (dist < hi) & mappable & ~own
+        sel = usable[in_band]
+        sel = sel[np.isfinite(sel)]
+        if sel.size:
+            label = _band_label(lo, hi)
+            band_means[label] = _finite(sel.mean())
+            band_bins[label] = int(sel.size)
     finite = np.isfinite(vals)
     n = int(finite.sum())
     stride = max(1, n // PROFILE_POINT_CAP)
@@ -332,10 +402,20 @@ def virtual_4c(
             {"start": int(pos[i]), "balanced": _finite(vals[i])} for i in idx
         ],
         "profile_note": (
-            f"{n} finite bins; downsampled by taking every {stride}th point. The viewpoint's "
-            "own bin reads NaN by construction (short-range diagonals are masked in balancing)."
+            f"{n} bins carry a measured contact value; downsampled by taking every "
+            f"{stride}th point for transport. cooltools masks the viewpoint's own bin, so "
+            "it reads null. Bins that are mappable but share no contacts with the "
+            "viewpoint are genuine zeros and are counted as zero in the band means; "
+            "ICE-filtered bins carry no measurement and are excluded from them."
         ),
         "distance_band_means": band_means,
+        "distance_band_bins": band_bins,
+        "distance_bands_cover_bp": [0, bands[-1][1]],
+        "coverage_note": (
+            f"Band means summarise separations up to {bands[-1][1] // 1_000_000} Mb; the "
+            f"profile itself spans the whole chromosome "
+            f"({int(clr.chromsizes[chrom]) // 1_000_000} Mb here)."
+        ),
         "balanced": True,
         "method": "cooltools.virtual4c (balanced row extraction at the viewpoint)",
     }
@@ -355,18 +435,42 @@ def expected_observed(
             "Balance it first with `cooler balance`."
         )
     chrom, start, end = parse_region_checked(clr, region)
-    demo = is_demo(path)
-    view = load_arms_view() if demo and int(clr.binsize) == 100_000 else None
+    binsize = int(clr.binsize)
+    # the arm view is resolution-independent, so it applies at every resolution - the
+    # region model must not change silently with bin size
+    view = load_arms_view() if is_demo(path) else None
+
+    scope_name = chrom
+    if view is not None:
+        row = view[(view["chrom"] == chrom) & (view["start"] <= start) & (view["end"] >= end)]
+        if not len(row):
+            arms = "; ".join(
+                f"{r['name']} {int(r['start']):,}-{int(r['end']):,}"
+                for _, r in view[view["chrom"] == chrom].iterrows()
+            )
+            raise AnalysisError(
+                f"{chrom}:{start:,}-{end:,} is not contained in a single chromosome arm, "
+                "so no single expected curve applies (the arms are separated by the "
+                f"ICE-filtered centromeric gap). Arms here: {arms}. Request a region "
+                "inside one arm."
+            )
+        scope_name = str(row.iloc[0]["name"])
+
     exp = expected_cis(clr, view_df=view, ignore_diags=IGNORE_DIAGS, nproc=1)
     exp = exp[exp["region1"] == exp["region2"]]
     # cooltools masks the first `ignore_diags` diagonals: `balanced.avg` is NaN there, and
-    # the SMOOTHED column carries a smoother extrapolation rather than a measurement. Using
-    # it would inflate the near-diagonal O/E by orders of magnitude and bend the P(s) fit,
-    # so every consumer below is restricted to diagonals that actually carry data.
+    # the SMOOTHED column carries a smoother extrapolation rather than a measurement.
     measured = exp[exp["balanced.avg"].notna()]
-    curve = measured.groupby("dist_bp", as_index=False)["balanced.avg.smoothed.agg"].mean()
-    curve = curve.rename(columns={"balanced.avg.smoothed.agg": "expected"}).dropna()
-    binsize = int(clr.binsize)
+    # the curve belongs to THIS region's scope, never the whole file - the per-region
+    # column, not the cross-region `.agg` aggregate
+    scoped = measured[measured["region1"] == scope_name]
+    curve = (
+        scoped[["dist_bp", "balanced.avg.smoothed"]]
+        .rename(columns={"balanced.avg.smoothed": "expected"})
+        .dropna()
+        .sort_values("dist_bp")
+    )
+
     fit_lo = max(100_000, IGNORE_DIAGS * binsize)
     sl = curve[(curve["dist_bp"] >= fit_lo) & (curve["dist_bp"] <= 10_000_000)]
     slope: float | None = None
@@ -374,10 +478,20 @@ def expected_observed(
     if len(sl) > 3:
         slope = _finite(np.polyfit(np.log10(sl["dist_bp"]), np.log10(sl["expected"]), 1)[0])
         fit_range = [int(sl["dist_bp"].min()), int(sl["dist_bp"].max())]
+
     n_bins = (end - start) // binsize
     out: dict = {
         "region": f"{chrom}:{start:,}-{end:,}",
         "resolution_used": binsize,
+        "view": (
+            f"{scope_name} (bundled arm view)"
+            if view is not None
+            else f"{scope_name} (whole chromosome)"
+        ),
+        "curve_scope": (
+            f"the expected curve and slope describe all of {scope_name}, not only the "
+            "requested region"
+        ),
         "ps_slope": slope,
         "ps_fit_range_bp": fit_range,
         "ignored_diagonals": IGNORE_DIAGS,
@@ -394,24 +508,7 @@ def expected_observed(
     }
     if n_bins <= MATRIX_BIN_CAP:
         obs = clr.matrix(balance=True).fetch(f"{chrom}:{start}-{end}")
-        # the expected curve for THIS region: its arm when a view is in play
-        if view is not None:
-            row = view[(view["chrom"] == chrom) & (view["start"] <= start) & (view["end"] >= end)]
-            if not len(row):
-                arms = "; ".join(
-                    f"{r['name']} {int(r['start']):,}-{int(r['end']):,}"
-                    for _, r in view[view["chrom"] == chrom].iterrows()
-                )
-                raise AnalysisError(
-                    f"{chrom}:{start:,}-{end:,} is not contained in a single chromosome arm, "
-                    "so no single expected curve applies (the arms are separated by the "
-                    f"ICE-filtered centromeric gap). Arms here: {arms}. Request a region "
-                    "inside one arm."
-                )
-            sub = measured[measured["region1"] == row.iloc[0]["name"]]
-        else:
-            sub = measured[measured["region1"] == chrom]
-        exp_by_diag = sub.groupby("dist")["balanced.avg.smoothed.agg"].mean()
+        exp_by_diag = scoped.groupby("dist")["balanced.avg.smoothed"].mean()
         oe = np.full_like(obs, np.nan)
         for d in range(obs.shape[0]):
             e = exp_by_diag.get(d, np.nan)
@@ -421,12 +518,18 @@ def expected_observed(
                     oe[k, k + d] = v
                     oe[k + d, k] = v
         out["oe_matrix"] = [[_finite(v) for v in rowv] for rowv in oe]
-        out["note"] = (
-            f"The first {IGNORE_DIAGS} diagonals read null by construction: cooltools does "
-            "not measure expected there, so no honest observed/expected ratio exists for "
-            "separations under "
-            f"{IGNORE_DIAGS * binsize:,} bp."
-        )
+        if not np.isfinite(oe).any():
+            out["note"] = (
+                f"Every cell is null: {chrom}:{start:,}-{end:,} has no balanced signal at "
+                f"{binsize:,} bp (its bins are ICE-filtered, e.g. centromeric or "
+                "low-mappability). Ask for a region with mappable bins."
+            )
+        else:
+            out["note"] = (
+                f"The first {IGNORE_DIAGS} diagonals read null by construction: cooltools "
+                "does not measure expected there, so no honest observed/expected ratio "
+                f"exists for separations under {IGNORE_DIAGS * binsize:,} bp."
+            )
     else:
         out["oe_matrix"] = None
         out["note"] = (

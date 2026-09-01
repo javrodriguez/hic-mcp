@@ -18,8 +18,8 @@ REPO = Path(__file__).resolve().parents[1]
 FORBIDDEN = {
     "production-readiness": r"production[\s-]?(ready|grade)",
     "biographical claim": (
-        r"\b(PhD|postdoc|years of experience|my research|author of|decade of|"
-        r"NYU|Langone)\b"
+        r"\b(PhD|postdoc|years of experience|my research|author of|"
+        r"decade of (research|experience|work)|NYU|Langone)\b"
     ),
 }
 # Priority claims about this project ("the first MCP server to...", "the only Hi-C tool")

@@ -58,7 +58,7 @@ class InsulationTads(BaseModel):
     top_boundaries: list[Boundary]
     balanced: bool
     scale_note: str | None = Field(
-        default=None, description="Set when the bin size is too coarse for TAD-scale calls"
+        default=None, description="Set when the windows are too large for TAD-scale calls"
     )
     method: str
 
@@ -66,6 +66,9 @@ class InsulationTads(BaseModel):
 class ArmEigenvalue(BaseModel):
     region: str
     eigval1: float | None
+    variance_share: float | None = Field(
+        default=None, description="Scale-free counterpart to eigval1; compare regions by this"
+    )
 
 
 class E1Point(BaseModel):
@@ -78,11 +81,16 @@ class Compartments(BaseModel):
     view: str
     sign_convention: str
     eigenvalues: list[ArmEigenvalue]
+    eigenvalue_note: str | None = None
     balanced: bool
     region: str | None = None
     region_mean_E1: float | None = None
     region_call: str | None = None
-    region_sign_consistency: float | None = None
+    region_sign_consistency: float | None = Field(
+        default=None, description="Null when too few bins for the figure to mean anything"
+    )
+    confidence_note: str | None = None
+    transition_note: str | None = None
     E1_track: list[E1Point] | None = None
     genome_A_fraction: float | None = Field(
         default=None, description="Only set when the eigenvector is phased; null otherwise"
@@ -105,6 +113,9 @@ class Virtual4C(BaseModel):
     profile_points: list[ProfilePoint]
     profile_note: str
     distance_band_means: dict[str, float | None]
+    distance_band_bins: dict[str, int] = Field(default_factory=dict)
+    distance_bands_cover_bp: list[int] | None = None
+    coverage_note: str | None = None
     balanced: bool
     method: str
 
@@ -117,6 +128,8 @@ class ExpectedCurvePoint(BaseModel):
 class ExpectedObserved(BaseModel):
     region: str
     resolution_used: int
+    view: str = Field(description="The region whose expected curve this is")
+    curve_scope: str = Field(description="States what the curve and slope describe")
     ps_slope: float | None = Field(
         default=None, description="log-log slope of P(s) over the range actually fitted"
     )

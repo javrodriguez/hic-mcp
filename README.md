@@ -68,6 +68,8 @@ Every response names the method it used, the resolution it ran at, and whether v
 
 Point any tool at your own file with `file="/path/to/yours.mcool"`; omit it to use the bundled demo.
 
+**Two things worth knowing before you point it at a large file.** The `region` argument filters what is *reported*, not what is *computed* — insulation, compartments and expected curves are calculated across the whole chromosome (or arm) either way, so a genome-wide 10 kb `.mcool` will take minutes per call, not seconds. And the bundled demo dataset lives in this repository, not in the built package: install from a clone to get it, or pass your own file.
+
 ## Example prompts
 
 - *"What's in the demo Hi-C file — which chromosomes and resolutions?"*
@@ -76,7 +78,7 @@ Point any tool at your own file with `file="/path/to/yours.mcool"`; omit it to u
 - *"Plot me the contact-decay curve — what's the P(s) slope?"*
 - *"Run a virtual 4C from chr17:63 Mb and describe how contacts fall off with distance."*
 
-More in [`examples/PROMPTS.md`](examples/PROMPTS.md).
+More in [`examples/PROMPTS.md`](examples/PROMPTS.md). The same client config is in [`examples/claude_desktop_config.json`](examples/claude_desktop_config.json) (Claude Desktop) and [`examples/mcp.json`](examples/mcp.json) (project-scoped clients).
 
 ## A real session
 
@@ -97,7 +99,7 @@ Full provenance, the rebuild script, and the measured landmarks the test suite a
 
 ## Related work
 
-Hi-C analysis over MCP is thinly covered, and neighbours differ in scope rather than quality:
+Surveyed 31 August 2026. Hi-C analysis over MCP is thinly covered, and neighbours differ in scope rather than quality:
 
 - [`zhouhufeng/IGVFagent`](https://github.com/zhouhufeng/IGVFagent) — a 161-tool IGVF/ENCODE agent whose MCP surface includes three Hi-C tools (contact heatmap, Crane insulation, loop QC) built on cooler and hic-straw; it does not expose the cooltools analysis surface (compartments, expected curves, pileups).
 - [`aidenlab/juicebox-mcp`](https://github.com/aidenlab/juicebox-mcp) — Hi-C contact-matrix visualization over MCP.
