@@ -19,7 +19,6 @@ dist/
 .ruff_cache/
 *.egg-info/
 
-# --- Glitch publish boundary (added by workspace-git) ---
 .planning/
 STATE.md
 CLAUDE.md

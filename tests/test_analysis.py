@@ -346,3 +346,23 @@ def test_virtual4c_profile_stays_on_the_viewpoint_chromosome(two_chromosome_cool
     v = virtual_4c(file=two_chromosome_cool, viewpoint="cA:200,000-210,000")
     starts = [p["start"] for p in v["profile_points"]]
     assert max(starts) < 60 * 10_000  # cA is 60 bins; cB values would exceed this
+
+
+def test_insulation_refuses_an_unmeasurable_region_rather_than_reporting_zero():
+    """"0 boundaries" is an answer; a fully ICE-filtered region has no measurement.
+
+    The sibling tools already refuse on this exact region, so answering here would be
+    the one inconsistent - and quietly misleading - surface.
+    """
+    with pytest.raises(AnalysisError, match="no measurement"):
+        insulation_tads(region="chr17:23,000,000-25,000,000")
+
+
+def test_compartment_view_does_not_change_with_resolution():
+    """The arm view is resolution-independent; only the GC phasing track is 100 kb-bound."""
+    for res in (10_000, 100_000, 1_000_000):
+        out = compartments(region="chr17:50,100,000-51,100,000", resolution=res)
+        assert "arms" in out["view"], res
+    # phasing, and therefore the A/B call, is only claimed where the track applies
+    assert compartments(region=A_BLOCK, resolution=100_000)["region_call"] == "A"
+    assert compartments(region=A_BLOCK, resolution=10_000)["region_call"] == "unphased"

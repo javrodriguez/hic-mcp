@@ -189,6 +189,16 @@ def insulation_tads(
     if region is not None:
         chrom, start, end = parse_region_checked(clr, region)
         ins = ins[(ins["chrom"] == chrom) & (ins["end"] > start) & (ins["start"] < end)]
+        # "0 boundaries" is an ANSWER; a region with no insulation score at all is a
+        # refusal, and the sibling tools already refuse on exactly this input
+        score_col = f"log2_insulation_score_{sorted(windows)[len(windows) // 2]}"
+        if ins.empty or ins[score_col].isna().all():
+            raise AnalysisError(
+                f"No insulation score exists anywhere in {chrom}:{start:,}-{end:,} at "
+                f"{binsize:,} bp - its bins are ICE-filtered (centromeric or "
+                "low-mappability), so this is not a region with zero boundaries, it is a "
+                "region with no measurement. Choose a region with mappable bins."
+            )
     # rank at the middle window - the classic TAD scale for mammalian 10 kb data;
     # a boundary that is also called at the flanking windows is the robust kind
     rank_w = sorted(windows)[len(windows) // 2]
@@ -241,9 +251,12 @@ def compartments(
         )
     demo = is_demo(path)
     phasing = view = None
-    if demo and int(clr.binsize) == 100_000:
-        phasing = load_gc_track()
+    if demo:
+        # the arm view is resolution-independent, so it applies at every resolution;
+        # only the GC phasing track is tied to its own 100 kb binning
         view = load_arms_view()
+        if int(clr.binsize) == 100_000:
+            phasing = load_gc_track()
     eigvals, eigvecs = eigs_cis(clr, phasing_track=phasing, view_df=view, n_eigs=3)
     sign_convention = (
         "oriented by the bundled GC track (positive E1 = A = gene-dense/GC-rich)"

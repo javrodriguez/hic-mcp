@@ -1,7 +1,7 @@
 # A real agent session
 
 This is a curated reading of [`raw-session.jsonl`](raw-session.jsonl) — an actual headless Claude Code session driving this server over MCP.
-Every quotation below is copied from that file; the raw log is the evidence, this page is only the readable version of it.
+Every quotation below is copied from that file word for word. Where a quote is shortened for reading, it is marked as abridged and the cut is never silent — the raw log is the evidence, this page is only the readable version of it.
 
 **Reproduce it:** `python scripts/capture_demo.py` (see [`README.md`](README.md) in this folder for what that does).
 
@@ -25,7 +25,7 @@ Every quotation below is copied from that file; the raw log is the evidence, thi
 {"name": "mcp__hic-mcp__compartments", "input": {"region": "chr17:66,150,000-66,220,000"}}
 ```
 
-**The agent's conclusion, verbatim:**
+**The agent's conclusion — quoted exactly, but abridged.** The full answer includes five E1 rows where three are shown, and two further paragraphs of ranking detail; every word below is unaltered, and the complete text is in [`raw-session.jsonl`](raw-session.jsonl):
 
 > **Locus:** chr17:66,180,000–66,190,000 (10 kb bin)
 > **Boundary strength:** 2.763 (log2 insulation minimum: −1.659)
