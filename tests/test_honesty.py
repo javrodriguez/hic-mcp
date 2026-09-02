@@ -139,3 +139,29 @@ def test_every_tool_is_documented_in_the_readme_table():
     ):
         assert hasattr(analysis, tool), f"{tool} is documented but does not exist"
         assert f"`{tool}`" in readme, f"{tool} exists but is not in the README table"
+
+
+def test_readme_sample_output_is_what_the_code_actually_returns():
+    """A block labelled "Real output" must stay real as the code changes.
+
+    It drifted once already: a rounding fix changed every value by a digit and the
+    README kept the old numbers, which is exactly the small dishonesty this repo
+    claims to design against.
+    """
+    import json
+    import re
+
+    from hic_mcp.analysis import insulation_tads
+
+    readme = (REPO / "README.md").read_text()
+    block = re.search(r"```json\n(\{\n  \"resolution_used\".*?)```", readme, re.DOTALL)
+    assert block, "README no longer contains the sample-output block"
+    claimed = json.loads(block.group(1))
+    live = insulation_tads(region="chr17:65,000,000-67,000,000", top_n=2)
+    assert claimed["resolution_used"] == live["resolution_used"]
+    assert claimed["windows_bp"] == live["windows_bp"]
+    assert claimed["ranked_by"] == live["ranked_by"]
+    for shown, actual in zip(claimed["top_boundaries"], live["top_boundaries"], strict=True):
+        assert shown["locus"] == actual["locus"]
+        assert shown["strength"] == pytest.approx(actual["strength"], rel=1e-3)
+        assert shown["windows_detected"] == actual["windows_detected"]

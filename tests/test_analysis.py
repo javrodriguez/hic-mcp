@@ -324,3 +324,25 @@ def test_every_tool_names_method_resolution_and_balancing():
         assert "method" in out and ("cooler" in out["method"] or "cooltools" in out["method"])
         assert "balanced" in out
     assert all("resolution_used" in o for o in outs[1:])
+
+
+# --- the bring-your-own-file path (two chromosomes, not the demo's one) -------
+
+
+def test_every_tool_works_on_a_multi_chromosome_file(two_chromosome_cool):
+    """A single-chromosome demo cannot catch single-chromosome assumptions."""
+    f = two_chromosome_cool
+    summary = matrix_summary(file=f)
+    assert set(summary["chromosomes"]) == {"cA", "cB"}
+    assert contacts_at_locus(file=f, region="cA:0-200,000")["raw_contacts_sum"] > 0
+    assert insulation_tads(file=f, region="cA:0-500,000", top_n=1)["resolution_used"] == 10_000
+    v = virtual_4c(file=f, viewpoint="cA:200,000-210,000")
+    assert v["distance_band_means"], "virtual_4c returned no bands"
+    assert all(x is not None for x in v["distance_band_means"].values())
+
+
+def test_virtual4c_profile_stays_on_the_viewpoint_chromosome(two_chromosome_cool):
+    """The profile, its weights and its masks must all describe the same rows."""
+    v = virtual_4c(file=two_chromosome_cool, viewpoint="cA:200,000-210,000")
+    starts = [p["start"] for p in v["profile_points"]]
+    assert max(starts) < 60 * 10_000  # cA is 60 bins; cB values would exceed this

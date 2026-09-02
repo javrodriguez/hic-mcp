@@ -369,7 +369,11 @@ def virtual_4c(
     # wrong: an ICE-filtered bin carries no measurement (exclude it), while a mappable
     # bin with no contacts is a genuine zero (include it, or the decay looks flatter
     # than it is).
+    # the profile was filtered to the viewpoint's chromosome, so every mask below must
+    # be built from the SAME rows - indexing against the whole-genome bin table breaks
+    # on any multi-chromosome file
     all_bins = clr.bins()[:]
+    all_bins = all_bins[all_bins["chrom"].astype(str) == chrom].reset_index(drop=True)
     weights = all_bins["weight"].to_numpy()
     mappable = ~np.isnan(weights)
     # the viewpoint's own bins are masked by cooltools deliberately (self-contact), so

@@ -45,10 +45,10 @@ Real output from the bundled data — `insulation_tads(region="chr17:65,000,000-
   "windows_bp": [100000, 250000, 500000],
   "ranked_by": "boundary_strength at the 250000 bp window",
   "top_boundaries": [
-    {"locus": "chr17:66,180,000-66,190,000", "strength": 2.762923,
-     "log2_insulation": -1.658919, "windows_detected": [100000, 250000, 500000]},
-    {"locus": "chr17:66,680,000-66,690,000", "strength": 1.726271,
-     "log2_insulation": -1.123265, "windows_detected": [100000, 250000]}
+    {"locus": "chr17:66,180,000-66,190,000", "strength": 2.76292,
+     "log2_insulation": -1.65892, "windows_detected": [100000, 250000, 500000]},
+    {"locus": "chr17:66,680,000-66,690,000", "strength": 1.72627,
+     "log2_insulation": -1.12327, "windows_detected": [100000, 250000]}
   ]
 }
 ```
