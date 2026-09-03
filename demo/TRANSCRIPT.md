@@ -25,7 +25,7 @@ Every quotation below is copied from that file word for word. Where a quote is s
 {"name": "mcp__hic-mcp__compartments", "input": {"region": "chr17:66,150,000-66,220,000"}}
 ```
 
-**The agent's conclusion — quoted exactly, abridged only where marked.** The E1 table shows three of its five rows, and two paragraphs of ranking detail that sit between the header lines and the table are omitted entirely; the paragraphs below are complete and unaltered, and the full text is in [`raw-session.jsonl`](raw-session.jsonl):
+**The agent's conclusion — quoted exactly, abridged only where stated here.** Three things are omitted between the header lines and the table: one paragraph ranking the runner-up boundaries, a `## Compartment context` heading, and its one-line intro. The E1 table shows three of its five rows (the outer two, 66,000,000 and 66,400,000, are dropped). Everything below is otherwise complete and unaltered, and the full text is in [`raw-session.jsonl`](raw-session.jsonl):
 
 > **Locus:** chr17:66,180,000–66,190,000 (10 kb bin)
 > **Boundary strength:** 2.763 (log2 insulation minimum: −1.659)
