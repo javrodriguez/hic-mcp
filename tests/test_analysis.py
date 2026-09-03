@@ -366,3 +366,32 @@ def test_compartment_view_does_not_change_with_resolution():
     # phasing, and therefore the A/B call, is only claimed where the track applies
     assert compartments(region=A_BLOCK, resolution=100_000)["region_call"] == "A"
     assert compartments(region=A_BLOCK, resolution=10_000)["region_call"] == "unphased"
+
+
+# --- round-4 regressions: fix classes, not instances ---------------------------
+
+
+def test_insulation_uses_the_same_arm_view_as_its_siblings():
+    """Without the view cooltools normalises across the centromeric gap the other tools
+    refuse to compute across, shifting every score by a per-arm offset."""
+    out = insulation_tads(resolution=100_000, top_n=1)
+    assert "arms" in out["view"]
+    # and the 10 kb ground truth survives the view (measured: it does)
+    top = insulation_tads()["top_boundaries"][0]
+    assert top["locus"] == BOUNDARY_LOCUS
+    assert top["strength"] == pytest.approx(2.7629, rel=0.05)
+
+
+def test_virtual4c_refuses_a_region_sized_viewpoint():
+    """A viewpoint is an anchor; a whole chromosome must be refused, never profiled as empty."""
+    with pytest.raises(AnalysisError, match="at most"):
+        virtual_4c(viewpoint="chr17")
+    with pytest.raises(AnalysisError, match="at most"):
+        virtual_4c(viewpoint="chr17:63,000,000-83,000,000")
+
+
+def test_virtual4c_never_returns_an_empty_profile_silently():
+    """Every successful call carries at least one measured point."""
+    out = virtual_4c(viewpoint="chr17:63,000,000-63,100,000")
+    assert out["profile_points"]
+    assert "every 1th" not in out["profile_note"]

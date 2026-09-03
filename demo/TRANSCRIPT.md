@@ -25,7 +25,7 @@ Every quotation below is copied from that file word for word. Where a quote is s
 {"name": "mcp__hic-mcp__compartments", "input": {"region": "chr17:66,150,000-66,220,000"}}
 ```
 
-**The agent's conclusion — quoted exactly, but abridged.** The full answer includes five E1 rows where three are shown, and two further paragraphs of ranking detail; every word below is unaltered, and the complete text is in [`raw-session.jsonl`](raw-session.jsonl):
+**The agent's conclusion — quoted exactly, abridged only where marked.** The E1 table shows three of its five rows, and two paragraphs of ranking detail that sit between the header lines and the table are omitted entirely; the paragraphs below are complete and unaltered, and the full text is in [`raw-session.jsonl`](raw-session.jsonl):
 
 > **Locus:** chr17:66,180,000–66,190,000 (10 kb bin)
 > **Boundary strength:** 2.763 (log2 insulation minimum: −1.659)
@@ -37,7 +37,7 @@ Every quotation below is copied from that file word for word. Where a quote is s
 > | 66,200,000 | **−0.002** |
 > | 66,300,000 | +0.502 |
 >
-> The boundary bin … falls in the 66,100,000–66,200,000 bin, where **E1 = −0.243** — a weak **B compartment** call, but E1 is climbing toward zero and flips positive (A) just one bin downstream. The tool explicitly flagged this as a compartment transition rather than clean B territory.
+> The boundary bin (66,180,000–66,190,000) falls in the 66,100,000–66,200,000 bin, where **E1 = −0.243** — a weak **B compartment** call, but E1 is climbing toward zero and flips positive (A) just one bin downstream (66,300,000: E1 = +0.50). The tool explicitly flagged this as a compartment transition rather than clean B territory (region mean E1 over the flanking 2-bin window = −0.123, nominal call "B", but with a `transition_note` warning the sign changes nearby).
 >
 > **Bottom line:** the strongest TAD boundary in the demo dataset sits almost exactly at an A/B compartment transition — weakly B on the boundary bin itself, flipping to strongly A immediately downstream. This is a biologically sensible result: TAD boundaries frequently coincide with compartment switches.
 

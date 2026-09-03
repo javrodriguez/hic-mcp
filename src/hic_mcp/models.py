@@ -52,6 +52,7 @@ class Boundary(BaseModel):
 class InsulationTads(BaseModel):
     region: str | None = None
     resolution_used: int
+    view: str = Field(description="The region model the score was normalised within")
     windows_bp: list[int]
     ranked_by: str
     boundary_counts_per_window: dict[str, int]

@@ -54,20 +54,27 @@ def resolve_input_path(file: str | None) -> Path:
     return p
 
 
-def list_resolutions(path: Path) -> list[int]:
-    """Resolutions available in the file (a plain .cool has exactly one)."""
+def _resolution_uris(path: Path) -> dict[int, str]:
+    """Every cooler inside the file, keyed by bin size -> its actual URI.
+
+    Multi-resolution files are not always laid out as /resolutions/<binsize>; opening
+    the URI that was really found is what keeps a custom layout from raising a KeyError.
+    """
     uris = cooler.fileops.list_coolers(str(path))
     if uris == ["/"]:
-        return [int(cooler.Cooler(str(path)).binsize)]
-    res = []
-    for uri in uris:
-        res.append(int(cooler.Cooler(f"{path}::{uri}").binsize))
-    return sorted(res)
+        return {int(cooler.Cooler(str(path)).binsize): "/"}
+    return {int(cooler.Cooler(f"{path}::{u}").binsize): u for u in uris}
+
+
+def list_resolutions(path: Path) -> list[int]:
+    """Resolutions available in the file (a plain .cool has exactly one)."""
+    return sorted(_resolution_uris(path))
 
 
 def open_matrix(path: Path, resolution: int | None, default: int) -> cooler.Cooler:
     """Open the file at the requested resolution (or the nearest sensible default)."""
-    available = list_resolutions(path)
+    by_res = _resolution_uris(path)
+    available = sorted(by_res)
     if resolution is None:
         resolution = default if default in available else available[0]
     if resolution not in available:
@@ -75,10 +82,8 @@ def open_matrix(path: Path, resolution: int | None, default: int) -> cooler.Cool
             f"Resolution {resolution} bp is not in {path.name}. "
             f"Available: {', '.join(str(r) for r in available)} bp."
         )
-    uris = cooler.fileops.list_coolers(str(path))
-    if uris == ["/"]:
-        return cooler.Cooler(str(path))
-    return cooler.Cooler(f"{path}::/resolutions/{resolution}")
+    uri = by_res[resolution]
+    return cooler.Cooler(str(path) if uri == "/" else f"{path}::{uri}")
 
 
 def parse_region_checked(clr: cooler.Cooler, region: str) -> tuple[str, int, int]:

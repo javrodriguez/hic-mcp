@@ -84,3 +84,28 @@ def test_data_dir_env_override(monkeypatch, tmp_path):
 def test_tiny_fixture_is_real_cooler(tiny_unbalanced_cool):
     info = cooler.Cooler(tiny_unbalanced_cool).info
     assert info["nnz"] > 0
+
+
+def test_open_matrix_uses_the_uri_it_found(tmp_path):
+    """A multi-resolution file need not be laid out as /resolutions/<binsize>."""
+    import numpy as np
+    import pandas as pd
+
+    path = tmp_path / "custom.mcool"
+    for k_, (label, bs) in enumerate((("coarse", 20_000), ("fine", 10_000))):
+        n = 50
+        bins = pd.DataFrame(
+            {"chrom": "cX", "start": np.arange(n) * bs, "end": (np.arange(n) + 1) * bs}
+        )
+        i, j = np.triu_indices(n)
+        c = np.random.default_rng(1).poisson(80.0 / (1 + (j - i))).astype(int)
+        k = c > 0
+        cooler.create_cooler(
+            f"{path}::/maps/{label}",
+            bins,
+            pd.DataFrame({"bin1_id": i[k], "bin2_id": j[k], "count": c[k]}),
+            mode="w" if k_ == 0 else "a",  # the default "w" would truncate the first
+        )
+    assert list_resolutions(path) == [10_000, 20_000]
+    assert open_matrix(path, 20_000, default=10_000).binsize == 20_000
+    assert open_matrix(path, None, default=10_000).binsize == 10_000

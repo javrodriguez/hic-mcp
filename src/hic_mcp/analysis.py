@@ -33,6 +33,7 @@ IGNORE_DIAGS = 2  # cooltools' expected default: the first 2 diagonals carry no 
 CLASSIC_TAD_WINDOWS = (100_000, 250_000, 500_000)  # mammalian TAD scale
 COARSE_WINDOW_BINS = (3, 5, 10)  # fallback multipliers when bins are too big for the above
 MIN_BINS_FOR_CONSISTENCY = 3  # below this a sign-consistency figure is vacuous
+VIEWPOINT_MAX_BINS = 10  # a virtual-4C viewpoint is an anchor, not a region
 
 
 def _finite(x: float) -> float | None:
@@ -185,7 +186,11 @@ def insulation_tads(
                 f"least 3 bins, i.e. {3 * binsize:,} bp here). Pass larger windows_bp, or "
                 "omit resolution to use this file's finest level."
             )
-    ins = insulation(clr, windows, verbose=False)
+    # the same arm view the sibling tools use: without it cooltools median-normalises
+    # the diamond score and measures boundary prominence ACROSS the centromeric gap,
+    # which shifts every score by a per-arm offset and can reorder the top boundaries
+    view = load_arms_view() if is_demo(path) else None
+    ins = insulation(clr, windows, view_df=view, verbose=False)
     if region is not None:
         chrom, start, end = parse_region_checked(clr, region)
         ins = ins[(ins["chrom"] == chrom) & (ins["end"] > start) & (ins["start"] < end)]
@@ -219,6 +224,7 @@ def insulation_tads(
     out = {
         "region": region,
         "resolution_used": binsize,
+        "view": "chr17 p/q arms (bundled)" if view is not None else "whole chromosomes",
         "windows_bp": windows,
         "ranked_by": f"boundary_strength at the {rank_w} bp window",
         "boundary_counts_per_window": counts,
@@ -358,6 +364,14 @@ def virtual_4c(
             "Balance it first with `cooler balance`."
         )
     chrom, start, end = parse_region_checked(clr, viewpoint)
+    max_width = max(VIEWPOINT_MAX_BINS * int(clr.binsize), 100_000)
+    if end - start > max_width:
+        raise AnalysisError(
+            f"Viewpoint {chrom}:{start:,}-{end:,} spans {end - start:,} bp; a virtual-4C "
+            f"viewpoint is a small anchor, at most {max_width:,} bp at this resolution "
+            f"({VIEWPOINT_MAX_BINS} bins). Name a locus, e.g. '{chrom}:{start:,}-"
+            f"{start + int(clr.binsize):,}', or use contacts_at_locus for a wide region."
+        )
     if end - start < int(clr.binsize):
         # pad to a whole bin, but never past the chromosome's own end
         chrom_end = int(clr.chromsizes[chrom])
@@ -410,6 +424,11 @@ def virtual_4c(
             band_bins[label] = int(sel.size)
     finite = np.isfinite(vals)
     n = int(finite.sum())
+    if n == 0:
+        raise AnalysisError(
+            f"No measured contacts anywhere on {chrom} from viewpoint {chrom}:{start:,}-"
+            f"{end:,} - nothing to profile. Check the viewpoint sits in mappable bins."
+        )
     stride = max(1, n // PROFILE_POINT_CAP)
     idx = np.where(finite)[0][::stride]
     return {
@@ -419,8 +438,9 @@ def virtual_4c(
             {"start": int(pos[i]), "balanced": _finite(vals[i])} for i in idx
         ],
         "profile_note": (
-            f"{n} bins carry a measured contact value; downsampled by taking every "
-            f"{stride}th point for transport. cooltools masks the viewpoint's own bin, so "
+            f"{n} bins carry a measured contact value"
+            + (f"; downsampled to every {stride}th point for transport" if stride > 1 else "")
+            + ". cooltools masks the viewpoint's own bin, so "
             "it reads null. Bins that are mappable but share no contacts with the "
             "viewpoint are genuine zeros and are counted as zero in the band means; "
             "ICE-filtered bins carry no measurement and are excluded from them."
