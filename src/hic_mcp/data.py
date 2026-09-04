@@ -54,16 +54,45 @@ def resolve_input_path(file: str | None) -> Path:
     return p
 
 
+def _unreadable(path: Path, exc: Exception) -> DataError:
+    """A file that will not open is a fixable input, not an internal defect."""
+    head = b""
+    try:
+        head = path.open("rb").read(64)
+    except OSError:
+        pass
+    if head.startswith(b"version https://git-lfs"):
+        why = (
+            "it is a Git-LFS pointer, not the data itself - run `git lfs pull` in the "
+            "repository that provided it"
+        )
+    elif not head.startswith(b"\x89HDF"):
+        why = "it is not an HDF5 file at all (a .cool/.mcool is HDF5)"
+    else:
+        why = (
+            "it is HDF5 but not a readable cooler - most often a truncated or "
+            "partially-downloaded file"
+        )
+    return DataError(f"Could not open {path.name}: {why}. ({type(exc).__name__}: {exc})")
+
+
 def _resolution_uris(path: Path) -> dict[int, str]:
     """Every cooler inside the file, keyed by bin size -> its actual URI.
 
     Multi-resolution files are not always laid out as /resolutions/<binsize>; opening
     the URI that was really found is what keeps a custom layout from raising a KeyError.
     """
-    uris = cooler.fileops.list_coolers(str(path))
-    if uris == ["/"]:
-        return {int(cooler.Cooler(str(path)).binsize): "/"}
-    return {int(cooler.Cooler(f"{path}::{u}").binsize): u for u in uris}
+    try:
+        uris = cooler.fileops.list_coolers(str(path))
+        if uris == ["/"]:
+            return {int(cooler.Cooler(str(path)).binsize): "/"}
+        if not uris:
+            raise IndexError("no coolers in file")
+        return {int(cooler.Cooler(f"{path}::{u}").binsize): u for u in uris}
+    except DataError:
+        raise
+    except Exception as e:  # noqa: BLE001 - every failure here is about the file
+        raise _unreadable(path, e) from e
 
 
 def list_resolutions(path: Path) -> list[int]:
@@ -112,19 +141,54 @@ def load_gc_track() -> pd.DataFrame:
     return pd.read_csv(p, sep="\t")
 
 
+def _header_kwargs(p: Path) -> dict:
+    """Decide how to parse a BED-like file: header row or not, comments or not.
+
+    Detected by SHAPE, not by a literal prefix - a header is any first row whose
+    start/end fields are not numeric. A column called "Chromosome" is still a header.
+    A '#chrom' line is BED convention, but treating '#' as a comment marker at the same
+    time blanks it and silently eats the first real data row, so the two never combine.
+    """
+    lines = [ln for ln in p.read_text(errors="ignore").splitlines() if ln.strip()]
+    # a '#' line with fewer than three tab fields is prose, not a header row
+    skip = 0
+    for ln in lines:
+        if ln.lstrip().startswith("#") and len(ln.split("\t")) < 3:
+            skip += 1
+        else:
+            break
+    if skip >= len(lines):
+        return {"sep": "\t", "header": None, "comment": "#", "skiprows": skip}
+    fields = lines[skip].split("\t")
+    looks_like_header = True
+    if len(fields) >= 3:
+        try:
+            int(float(fields[1]))
+            int(float(fields[2]))
+            looks_like_header = False
+        except ValueError:
+            looks_like_header = True
+    if looks_like_header:
+        # the '#' is part of the header row, so it must not also be a comment marker
+        return {"sep": "\t", "header": 0, "skiprows": skip}
+    return {"sep": "\t", "header": None, "comment": "#", "skiprows": skip}
+
+
 def load_view_file(path: str) -> pd.DataFrame:
     """A user-supplied region view: BED-like, chrom/start/end[/name], tab-separated."""
     p = Path(path).expanduser()
     if not p.exists():
         raise DataError(f"No such view file: {p}. Expected a tab-separated BED-like file.")
-    # sniff a header row: the README names chrom/start/end/name and the bundled
-    # track ships with one, so a file in exactly the documented shape must load
-    first_line = p.read_text(errors="ignore").split("\n", 1)[0].lower()
-    header = 0 if first_line.startswith(("chrom", "#chrom")) else None
+    kwargs = _header_kwargs(p)
     try:
-        df = pd.read_csv(p, sep="\t", header=header, comment="#")
+        df = pd.read_csv(p, **kwargs)
     except Exception as e:  # noqa: BLE001 - the message is what the agent acts on
         raise DataError(f"Could not read view file {p.name}: {e}") from e
+    if df.empty:
+        raise DataError(
+            f"View file {p.name} has a header but no regions. Add at least one "
+            "tab-separated chrom/start/end row."
+        )
     if df.shape[1] < 3:
         raise DataError(
             f"View file {p.name} has {df.shape[1]} column(s); expected at least "
@@ -156,20 +220,31 @@ def load_track_file(path: str) -> pd.DataFrame:
     p = Path(path).expanduser()
     if not p.exists():
         raise DataError(f"No such phasing track: {p}. Expected a tab-separated bedGraph.")
-    first_line = p.read_text(errors="ignore").split("\n", 1)[0].lower()
-    header = 0 if first_line.startswith("chrom") else None
+    kwargs = _header_kwargs(p)
     try:
-        df = pd.read_csv(p, sep="\t", header=header, comment="#")
+        df = pd.read_csv(p, **kwargs)
     except Exception as e:  # noqa: BLE001
         raise DataError(f"Could not read phasing track {p.name}: {e}") from e
+    if df.empty:
+        raise DataError(f"Phasing track {p.name} has a header but no rows.")
     if df.shape[1] < 4:
         raise DataError(
             f"Phasing track {p.name} has {df.shape[1]} column(s); expected chrom, start, "
             "end and a value column (e.g. GC fraction)."
         )
     df = df.iloc[:, :4]
-    df.columns = ["chrom", "start", "end", df.columns[3] if header == 0 else "value"]
+    value_name = str(df.columns[3]) if kwargs.get("header") == 0 else "value"
+    df.columns = ["chrom", "start", "end", value_name]
     df["chrom"] = df["chrom"].astype(str)
+    for col in ("start", "end", value_name):
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    if df[["start", "end"]].isna().any().any():
+        raise DataError(
+            f"Phasing track {p.name} has non-numeric start/end values. Expected "
+            "tab-separated chrom, start, end and a numeric value column."
+        )
+    df["start"] = df["start"].astype(int)
+    df["end"] = df["end"].astype(int)
     return df
 
 

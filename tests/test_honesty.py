@@ -267,3 +267,66 @@ def test_transcript_quotes_the_conclusion_completely_and_unaltered():
         "the quoted conclusion differs from the raw log - re-run scripts/capture_demo.py "
         "and re-quote it whole rather than editing either one"
     )
+
+
+def test_committed_demo_results_replay_against_live_code():
+    """Replay every recorded tool result: the log must not drift from the server.
+
+    The log went stale twice - once carrying pre-fix numbers, once carrying field
+    names the code no longer emits - while TRANSCRIPT.md claimed a test would catch
+    exactly that. No test did: the landmark guard re-derives PROVENANCE, not the log.
+    This one calls the tools with the recorded arguments and compares the responses.
+    """
+    import json
+
+    from hic_mcp import analysis, models
+
+    records = [
+        json.loads(line)
+        for line in (REPO / "demo" / "raw-session.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    calls = {}
+    for rec in records:
+        if rec.get("type") == "assistant":
+            for c in rec["message"]["content"]:
+                if c.get("type") == "tool_use" and str(c.get("name", "")).startswith(
+                    "mcp__hic-mcp__"
+                ):
+                    calls[c["id"]] = (c["name"].rsplit("__", 1)[-1], c["input"])
+    results = {}
+    for rec in records:
+        msg = rec.get("message", {})
+        if rec.get("type") == "user" and isinstance(msg.get("content"), list):
+            for c in msg["content"]:
+                if c.get("type") == "tool_result" and c.get("tool_use_id") in calls:
+                    body = c.get("content")
+                    text = (
+                        " ".join(x.get("text", "") for x in body if isinstance(x, dict))
+                        if isinstance(body, list)
+                        else str(body)
+                    )
+                    results[c["tool_use_id"]] = text
+
+    assert results, "no recorded tool results found in the demo log"
+    for call_id, recorded_text in results.items():
+        name, kwargs = calls[call_id]
+        try:
+            recorded = json.loads(recorded_text)
+        except json.JSONDecodeError:
+            continue  # not a JSON payload; nothing to compare
+        # wrap through the same response model the server returns, so optional
+        # fields serialise identically - otherwise this compares a raw dict against
+        # an MCP payload and reports serialisation as drift
+        model = getattr(models, "".join(w.title() for w in name.split("_")), None)
+        live_raw = getattr(analysis, name)(**kwargs)
+        live = json.loads(model(**live_raw).model_dump_json()) if model else live_raw
+        assert set(recorded) == set(live), (
+            f"{name}: the committed log and the live server return different fields "
+            f"(log-only {sorted(set(recorded) - set(live))}, "
+            f"live-only {sorted(set(live) - set(recorded))}). Re-run "
+            "scripts/capture_demo.py rather than editing the log."
+        )
+        for key, recorded_value in recorded.items():
+            if isinstance(recorded_value, (str, int, bool)) or recorded_value is None:
+                assert recorded_value == live[key], f"{name}.{key} drifted from the log"

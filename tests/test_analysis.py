@@ -374,9 +374,10 @@ def test_insulation_refuses_an_unmeasurable_region_rather_than_reporting_zero():
     """
     with pytest.raises(AnalysisError) as e:
         insulation_tads(region="chr17:23,000,000-25,000,000")
-    # the view check fires first and is the more precise diagnosis, but it must still
-    # tell the caller the bins carry no signal - both facts, not one
-    assert "ICE-filtered" in str(e.value)
+    # the centromere lies outside both arms of the bundled view, and that is the more
+    # precise diagnosis than "unmappable" - it names the view and the road forward
+    assert "lies outside every region of the view" in str(e.value)
+    assert "chr17p" in str(e.value) and "chr17q" in str(e.value)
 
 
 def test_compartment_view_does_not_change_with_resolution():
@@ -486,7 +487,8 @@ def test_phasing_track_not_covering_the_view_is_an_agent_readable_error(
             "GC": np.random.default_rng(1).uniform(0.3, 0.6, 60),
         }
     ).to_csv(track, sep="\t", index=False)
-    with pytest.raises(AnalysisError, match="no values for cB"):
+    # the coverage check now names the uncovered region specifically
+    with pytest.raises(AnalysisError, match="covers less than half of cB_all"):
         compartments(
             file=two_chromosome_cool,
             view=str(view),
@@ -559,9 +561,15 @@ def test_region_outside_the_view_is_not_blamed_on_the_data(tmp_path, two_chromos
     outside = "cA:400,000-500,000"
     f = two_chromosome_cool
     v = str(view)
-    for tool in (insulation_tads, compartments, expected_observed):
+    # the aggregating tools need one curve / one decomposition, so they say the region
+    # is not contained in a single view region
+    for tool in (compartments, expected_observed):
         with pytest.raises(AnalysisError, match="not contained in any single region of the view"):
             tool(file=f, view=v, region=outside)
+    # insulation is per-bin, so it is not gated on containment - but it must still name
+    # the view rather than blaming ICE filtering for bins it simply never computed
+    with pytest.raises(AnalysisError, match="lies outside every region of the view"):
+        insulation_tads(file=f, view=v, region=outside)
 
 
 def test_phasing_coverage_is_checked_without_a_view_too(tmp_path, two_chromosome_cool):
@@ -578,7 +586,7 @@ def test_phasing_coverage_is_checked_without_a_view_too(tmp_path, two_chromosome
             "GC": np.random.default_rng(2).uniform(0.3, 0.6, 60),
         }
     ).to_csv(track, sep="\t", index=False)
-    with pytest.raises(AnalysisError, match="no values for cB"):
+    with pytest.raises(AnalysisError, match="covers less than half of cB"):
         compartments(file=two_chromosome_cool, phasing_track=str(track), region="cA:0-300,000")
 
 
@@ -684,3 +692,109 @@ def test_a_narrow_region_is_not_called_unmappable():
 def test_band_coverage_reflects_the_window():
     out = virtual_4c(viewpoint="chr17:63,000,000-63,100,000", window_bp=1_000_000)
     assert out["distance_bands_cover_bp"] == [0, 1_000_000]
+
+
+# --- round-8 ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "label,body,expected_regions",
+    [
+        (
+            "#chrom header",
+            "#chrom\tstart\tend\tname\ncA\t0\t200000\tr1\ncA\t200000\t400000\tr2\n",
+            2,
+        ),
+        (
+            "plain header",
+            "chrom\tstart\tend\tname\ncA\t0\t200000\tr1\ncA\t200000\t400000\tr2\n",
+            2,
+        ),
+        ("comment line", "# a note\ncA\t0\t200000\tr1\ncA\t200000\t400000\tr2\n", 2),
+        ("bare rows", "cA\t0\t200000\tr1\ncA\t200000\t400000\tr2\n", 2),
+    ],
+)
+def test_every_view_header_shape_keeps_every_region(tmp_path, label, body, expected_regions):
+    """A '#chrom' header once ate the first region silently - wrong science, not an error."""
+    from hic_mcp.data import load_view_file
+
+    f = tmp_path / "v.bed"
+    f.write_text(body)
+    assert len(load_view_file(str(f))) == expected_regions, label
+
+
+def test_trans_block_is_not_called_balanced_under_a_cis_only_solution(two_chromosome_cool):
+    """Weights fitted per chromosome were never fitted for trans."""
+    out = contacts_at_locus(
+        file=two_chromosome_cool,
+        region="cA:0-200,000",
+        region2="cB:0-200,000",
+        resolution=10_000,
+    )
+    assert out["balanced"] is False
+    assert out["balanced_mean"] is None
+    assert "cis-only" in out["note"]
+    # the cis path on the same file is still balanced
+    cis = contacts_at_locus(file=two_chromosome_cool, region="cA:0-200,000", resolution=10_000)
+    assert cis["balanced"] is True
+
+
+def test_compartments_refuses_before_an_out_of_memory_kill(monkeypatch):
+    """An OOM kill hands the agent a dead transport; a refusal hands it a reason."""
+    import hic_mcp.analysis as an
+
+    monkeypatch.setattr(an, "COMPARTMENT_MEMORY_CAP_GB", 0.001)
+    with pytest.raises(AnalysisError, match="Refusing to run"):
+        an.compartments(region=A_BLOCK)
+
+
+def test_the_real_memory_cap_lets_the_bundled_demo_through():
+    """The guard must protect against a genome, not obstruct the demo."""
+    assert compartments(region=A_BLOCK)["region_call"] == "A"
+
+
+def test_unreadable_files_are_diagnosed_not_blamed_on_the_server(tmp_path):
+    """A Git-LFS pointer or truncated download is the file's problem, and fixable."""
+    from hic_mcp.data import DataError
+
+    lfs = tmp_path / "pointer.cool"
+    lfs.write_text("version https://git-lfs.github.com/spec/v1\noid sha256:deadbeef\n")
+    with pytest.raises(DataError, match="Git-LFS pointer"):
+        matrix_summary(file=str(lfs))
+
+    truncated = tmp_path / "truncated.mcool"
+    truncated.write_bytes(b"\x89HDF\r\n\x1a\n" + b"\x00" * 64)
+    with pytest.raises(DataError, match="not a readable cooler"):
+        matrix_summary(file=str(truncated))
+
+
+def test_a_thin_phasing_track_is_refused_with_a_reason(tmp_path):
+    """Naming the chromosome is not covering it; cooltools needs nearly every bin."""
+    track = tmp_path / "thin.bed"
+    track.write_text("chr17\t0\t100000\t0.45\nchr17\t100000\t200000\t0.5\n")
+    with pytest.raises(AnalysisError, match="covers less than half"):
+        compartments(phasing_track=str(track), region=A_BLOCK)
+
+
+def test_a_header_is_detected_by_shape_not_by_its_first_word(tmp_path):
+    """'Chromosome' is a header too; only the numeric shape of row one can tell."""
+    from hic_mcp.data import load_track_file, load_view_file
+
+    odd = tmp_path / "odd.tsv"
+    odd.write_text("Chromosome\tstart\tend\tGC\nchr17\t0\t100000\t0.45\n")
+    assert len(load_track_file(str(odd))) == 1  # the header is not read as data
+
+    bare = tmp_path / "bare.bed"
+    bare.write_text("cA\t0\t200000\tr1\n")
+    assert len(load_view_file(str(bare))) == 1
+
+
+def test_insulation_accepts_a_whole_chromosome_region():
+    """`region` filters which bins are reported; it is not a containment claim.
+
+    Requiring containment refused region='chr17' while the same call with no region
+    returned exactly those boundaries - a refusal the tool contradicted itself on.
+    """
+    whole = insulation_tads(region="chr17", top_n=1)
+    unfiltered = insulation_tads(top_n=1)
+    assert whole["top_boundaries"][0]["locus"] == unfiltered["top_boundaries"][0]["locus"]

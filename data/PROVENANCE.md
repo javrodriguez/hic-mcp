@@ -25,11 +25,12 @@ chr17 was chosen because trans contacts in the two-chromosome source are negligi
 ## Companion files
 
 - `gc_100kb.tsv` — GC fraction per 100 kb bin, computed from the UCSC hg38 chr17 FASTA; the phasing track that orients the compartment eigenvector (A = gene-dense/GC-rich convention).
+  Rebuild and verify it the same way as the matrix: `uv run python scripts/make_gc_track.py --out /tmp/gc.tsv --verify-against data/gc_100kb.tsv` (downloads the public chr17 FASTA; N-masked bins are left empty).
 - `chr17_arms.bed` — the p/q arm view used for eigenvector computation, derived programmatically from the shipped file itself: the longest ICE-filtered (NaN-weight) run at 100 kb is the centromeric gap, chr17:21,600,000-27,100,000; arms are the flanks (chr17p 0-21.6 Mb, chr17q 27.1-83.26 Mb).
 
 ## Known landmarks (measured on this file; used by the test suite)
 
-_Every figure here is re-derived from the shipped code by `test_documented_landmarks_are_re_derived_from_live_code`, so a change in the computation fails the build instead of quietly leaving this page stale._
+_The boundary locus and its strength and log2 value, the eigenvector-GC correlation, and both compartment-block E1 means are re-derived from the shipped code by `test_documented_landmarks_are_re_derived_from_live_code`; the per-arm P(s) slopes and the contact total are pinned by their own tests in `test_analysis.py`. The no-view correlation (r = 0.4810) is recorded for comparison and is not asserted anywhere — it describes a configuration the tools no longer use._
 
 - Strongest insulation boundary: chr17:66,180,000-66,190,000 (boundary at 100 kb / 250 kb / 500 kb windows; strength 2.76292, log2 insulation -1.63746 — measured WITH the bundled p/q arm view, which shifts log2 by a per-arm constant while leaving strength invariant).
 - Adjacent compartment flip: A block chr17:50.1-51.1 Mb (mean E1 1.17867), B block chr17:51.4-52.4 Mb (mean E1 -1.16722).

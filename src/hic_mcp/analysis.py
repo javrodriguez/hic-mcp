@@ -36,6 +36,7 @@ CLASSIC_TAD_WINDOWS = (100_000, 250_000, 500_000)  # mammalian TAD scale
 COARSE_WINDOW_BINS = (3, 5, 10)  # fallback multipliers when bins are too big for the above
 MIN_BINS_FOR_CONSISTENCY = 3  # below this a sign-consistency figure is vacuous
 VIEWPOINT_MAX_BINS = 10  # a virtual-4C viewpoint is an anchor, not a region
+COMPARTMENT_MEMORY_CAP_GB = 4.0  # eigs_cis densifies per region; refuse before the OOM
 
 
 def _finite(x: float) -> float | None:
@@ -154,6 +155,24 @@ def _view_label(view_df, view_arg: str | None, path) -> str:
     return "chr17 p/q arms (bundled)"
 
 
+def _balanced_cis_only(clr: Cooler) -> bool:
+    """True when the ICE solution was solved per-chromosome (cooler's cis_only flag).
+
+    Trans values under a cis-only solution are normalised by weights that were never
+    fitted for them, so reporting them as "balanced" would overstate what was computed.
+    """
+    try:
+        import h5py
+
+        uri = str(clr.filename)
+        group = clr.root.rstrip("/") if getattr(clr, "root", None) else ""
+        with h5py.File(uri, "r") as f:
+            node = f[f"{group}/bins/weight"] if group else f["bins/weight"]
+            return bool(node.attrs.get("cis_only", False))
+    except Exception:  # noqa: BLE001 - absence of the flag is simply "not known"
+        return False
+
+
 def _weights_present(clr: Cooler) -> bool:
     return "weight" in clr.bins().columns
 
@@ -235,6 +254,16 @@ def contacts_at_locus(
     use_weights = balanced and _weights_present(clr)
     r1 = f"{chrom}:{start}-{end}"
     r2 = f"{c2}:{s2}-{e2}"
+    if use_weights and c2 != chrom and _balanced_cis_only(clr):
+        # weights fitted per chromosome were never fitted for this trans block
+        use_weights = False
+        out_trans_note = (
+            "This file was ICE-balanced cis-only (per chromosome), so no balanced values "
+            f"exist for the {chrom} x {c2} block - its weights were never fitted for trans "
+            "contacts. Raw counts are reported instead."
+        )
+    else:
+        out_trans_note = None
     raw = clr.matrix(balance=False).fetch(r1, r2)
     # One counting convention, the file's own: each contact counted once. A single
     # region comes back as a symmetric square, so summing it whole would count every
@@ -259,6 +288,13 @@ def contacts_at_locus(
         "balanced": use_weights,
         "method": "cooler.Cooler.matrix().fetch (raw counts; ICE-balanced values when available)",
     }
+    if out_trans_note:
+        out["note"] = out_trans_note
+    # always present, null when not computed - an absent key reads as "not applicable"
+    # in one client and "missing" in another
+    out.setdefault("balanced_mean", None)
+    out.setdefault("balanced_max", None)
+    out.setdefault("balanced_matrix", None)
     if use_weights and raw.size:
         bal = clr.matrix(balance=True).fetch(r1, r2)
         finite_bal = bal[np.isfinite(bal)]
@@ -324,11 +360,31 @@ def insulation_tads(
     ins = insulation(clr, windows, view_df=view_df, verbose=False)
     if region is not None:
         chrom, start, end = parse_region_checked(clr, region)
-        _check_region_in_view(view_df, chrom, start, end, clr)
+        # NO single-region containment check here: insulation is per bin, so `region`
+        # only filters which rows are reported. Requiring containment refused
+        # region="chr17" while the same call with no region happily returned those very
+        # boundaries - the gate belongs on the tools that need one curve or one
+        # eigendecomposition, not on this one.
         ins = ins[(ins["chrom"] == chrom) & (ins["end"] > start) & (ins["start"] < end)]
         # "0 boundaries" is an ANSWER; a region with no insulation score at all is a
         # refusal, and the sibling tools already refuse on exactly this input
         score_col = f"log2_insulation_score_{sorted(windows)[len(windows) // 2]}"
+        if (ins.empty or ins[score_col].isna().all()) and view_df is not None:
+            overlapping = view_df[
+                (view_df["chrom"] == chrom)
+                & (view_df["end"] > start)
+                & (view_df["start"] < end)
+            ]
+            if not len(overlapping):
+                spans = "; ".join(
+                    f"{r['name']} {int(r['start']):,}-{int(r['end']):,}"
+                    for _, r in view_df[view_df["chrom"] == chrom].iterrows()
+                ) or f"none on {chrom}"
+                raise AnalysisError(
+                    f"{chrom}:{start:,}-{end:,} lies outside every region of the view "
+                    f"in use, so nothing was computed there. Regions on {chrom}: "
+                    f"{spans}. Ask inside one of them, or drop the view."
+                )
         if ins.empty or ins[score_col].isna().all():
             raise AnalysisError(
                 f"No insulation score exists anywhere in {chrom}:{start:,}-{end:,} at "
@@ -391,6 +447,25 @@ def compartments(
         )
     view_arg_used = view
     view_df = _resolve_view(path, view_arg_used, clr)
+    # eigs_cis densifies each view region: an n-bin region costs ~8n^2 bytes, and an
+    # OOM kill gives the calling agent a dead transport rather than a readable refusal
+    biggest = 0
+    if view_df is not None:
+        for _, r in view_df.iterrows():
+            biggest = max(biggest, (int(r["end"]) - int(r["start"])) // int(clr.binsize) + 1)
+    else:
+        biggest = max(
+            (int(size) // int(clr.binsize) + 1 for size in clr.chromsizes), default=0
+        )
+    projected_gb = 8 * biggest * biggest / 1e9
+    if projected_gb > COMPARTMENT_MEMORY_CAP_GB:
+        raise AnalysisError(
+            f"Refusing to run: the largest region to decompose is {biggest:,} bins at "
+            f"{int(clr.binsize):,} bp, which needs roughly {projected_gb:.1f} GB of dense "
+            f"matrix (cap {COMPARTMENT_MEMORY_CAP_GB} GB). Use a coarser resolution, or "
+            "pass a view of smaller regions - compartments are usually called at 100 kb "
+            "or coarser anyway."
+        )
     if phasing_track is not None:
         phasing = load_track_file(phasing_track)
     elif is_demo(path) and int(clr.binsize) == 100_000:
@@ -420,7 +495,16 @@ def compartments(
             scope = "with no view supplied, every chromosome in the file is decomposed"
         # a track that covers the regions but only sparsely still yields a weak
         # orientation; say so rather than letting a thin track pass silently
-        bins_needed = int(clr.info["nbins"])
+        # the bins actually decomposed - the view's regions when one is in force, not
+        # the whole file, or a track covering its scope completely is called sparse
+        if view_df is not None:
+            bins_needed = 0
+            for _, r in view_df.iterrows():
+                bins_needed += max(
+                    1, (int(r["end"]) - int(r["start"]) + int(clr.binsize) - 1) // int(clr.binsize)
+                )
+        else:
+            bins_needed = int(clr.info["nbins"])
         if bins_needed and len(phasing) / bins_needed < 0.5:
             coverage_warning = (
                 f"The phasing track has {len(phasing):,} rows against {bins_needed:,} bins "
@@ -429,6 +513,28 @@ def compartments(
             )
         else:
             coverage_warning = None
+        # the track must supply values for the BINS decomposed, not merely mention the
+        # chromosome: a two-row BED4 names chr17 and covers almost none of it
+        span_by_chrom = phasing.groupby("chrom").apply(
+            lambda g: int((g["end"] - g["start"]).sum()), include_groups=False
+        )
+        thin = []
+        if view_df is not None:
+            for _, r in view_df.iterrows():
+                width = int(r["end"]) - int(r["start"])
+                if span_by_chrom.get(str(r["chrom"]), 0) < 0.5 * width:
+                    thin.append(str(r["name"]))
+        else:
+            for chrom_name, size in clr.chromsizes.items():
+                if span_by_chrom.get(str(chrom_name), 0) < 0.5 * int(size):
+                    thin.append(str(chrom_name))
+        if thin:
+            raise AnalysisError(
+                f"The phasing track covers less than half of {', '.join(thin[:5])}. "
+                "cooltools needs a value for essentially every bin it decomposes - "
+                "supply a track binned across the whole region, or narrow the view to "
+                "what the track actually covers."
+            )
         missing = sorted(needed - covered)
         if missing:
             raise AnalysisError(
