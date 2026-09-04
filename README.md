@@ -42,13 +42,14 @@ Real output from the bundled data — `insulation_tads(region="chr17:65,000,000-
 ```json
 {
   "resolution_used": 10000,
+  "view": "chr17 p/q arms (bundled)",
   "windows_bp": [100000, 250000, 500000],
   "ranked_by": "boundary_strength at the 250000 bp window",
   "top_boundaries": [
     {"locus": "chr17:66,180,000-66,190,000", "strength": 2.76292,
-     "log2_insulation": -1.65892, "windows_detected": [100000, 250000, 500000]},
+     "log2_insulation": -1.63746, "windows_detected": [100000, 250000, 500000]},
     {"locus": "chr17:66,680,000-66,690,000", "strength": 1.72627,
-     "log2_insulation": -1.12327, "windows_detected": [100000, 250000]}
+     "log2_insulation": -1.1018, "windows_detected": [100000, 250000]}
   ]
 }
 ```
@@ -67,6 +68,13 @@ Every response names the method it used, the resolution it ran at, and whether v
 | `expected_observed` | Distance-expected contact curve, P(s) slope, and the O/E matrix | `cooltools.expected_cis` |
 
 Point any tool at your own file with `file="/path/to/yours.mcool"`; omit it to use the bundled demo.
+
+**Bringing your own file.** Two optional arguments make the analyses as meaningful on your data as they are on the demo:
+
+- `view` — a tab-separated BED-like file (`chrom`/`start`/`end`[/`name`]) partitioning the genome into regions analysed independently. Hi-C statistics should not be normalised across a centromere, so pass chromosome arms here; without it the tools fall back to whole chromosomes and say so in the `view` field they return.
+- `phasing_track` — a `chrom`/`start`/`end`/`value` file (GC fraction, gene density) that orients the compartment eigenvector. Without it the sign of E1 is arbitrary, so `compartments` reports `unphased` and refuses to label A or B rather than guessing.
+
+The bundled demo ships both, which is why it gets phased A/B calls and arm-partitioned scores out of the box.
 
 **Two things worth knowing before you point it at a large file.** The `region` argument filters what is *reported*, not what is *computed* — insulation, compartments and expected curves are calculated across the whole chromosome (or arm) either way, so a genome-wide 10 kb `.mcool` will take minutes per call, not seconds. And the bundled demo dataset lives in this repository, not in the built package: install from a clone to get it, or pass your own file.
 

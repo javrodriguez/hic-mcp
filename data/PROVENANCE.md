@@ -28,9 +28,11 @@ chr17 was chosen because trans contacts in the two-chromosome source are negligi
 
 ## Known landmarks (measured on this file; used by the test suite)
 
-- Strongest insulation boundary: chr17:66,180,000-66,190,000 (boundary at 100 kb / 250 kb / 500 kb windows; strength ≈ 2.76).
-- Adjacent compartment flip: A block chr17:50.1-51.1 Mb (mean E1 ≈ +1.18), B block chr17:51.4-52.4 Mb (mean E1 ≈ −1.17).
-- Eigenvector-GC correlation: Pearson r ≈ +0.48 at 100 kb.
+_Every figure here is re-derived from the shipped code by `test_documented_landmarks_are_re_derived_from_live_code`, so a change in the computation fails the build instead of quietly leaving this page stale._
+
+- Strongest insulation boundary: chr17:66,180,000-66,190,000 (boundary at 100 kb / 250 kb / 500 kb windows; strength 2.76292, log2 insulation -1.63746 — measured WITH the bundled p/q arm view, which shifts log2 by a per-arm constant while leaving strength invariant).
+- Adjacent compartment flip: A block chr17:50.1-51.1 Mb (mean E1 1.17867), B block chr17:51.4-52.4 Mb (mean E1 -1.16722).
+- Eigenvector-GC correlation: Pearson r = 0.4607 at 100 kb, with the arm view (r = 0.4810 without it).
 - Contact decay, per arm at 100 kb bins (fitted 200 kb-10 Mb): P(s) log-log slope −1.162 on chr17p and −1.241 on chr17q. The arms genuinely differ, so the tools report the curve for the arm a region sits in, never a file-wide average.
   The fit always starts past the first two diagonals, which `cooltools` leaves unmeasured (`ignore_diags=2`) — including them would bend the slope toward −1.0 and inflate the near-diagonal observed/expected by orders of magnitude, so the tools report the range they actually fitted.
 - Virtual-4C demo viewpoint chr17:63,000,000 — verified NOT in an ICE-filtered bin.

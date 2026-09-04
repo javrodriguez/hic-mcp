@@ -161,7 +161,92 @@ def test_readme_sample_output_is_what_the_code_actually_returns():
     assert claimed["resolution_used"] == live["resolution_used"]
     assert claimed["windows_bp"] == live["windows_bp"]
     assert claimed["ranked_by"] == live["ranked_by"]
+    assert claimed.get("view") == live["view"]
     for shown, actual in zip(claimed["top_boundaries"], live["top_boundaries"], strict=True):
-        assert shown["locus"] == actual["locus"]
-        assert shown["strength"] == pytest.approx(actual["strength"], rel=1e-3)
-        assert shown["windows_detected"] == actual["windows_detected"]
+        # EVERY field, not a chosen subset: log2_insulation once drifted while
+        # strength stayed put, because the guard checked strength and not log2
+        assert set(shown) == set(actual), "README block and live output have different fields"
+        for key, shown_value in shown.items():
+            actual_value = actual[key]
+            if isinstance(shown_value, float):
+                assert shown_value == pytest.approx(actual_value, rel=1e-3), key
+            else:
+                assert shown_value == actual_value, key
+
+
+def test_documented_landmarks_are_re_derived_from_live_code():
+    """Every measured figure in PROVENANCE must still be what the code produces.
+
+    Three "measured" artifacts once went stale in a single commit because a fix
+    changed the computation and nobody re-derived them. This test re-derives them,
+    so that class of drift fails the build instead of shipping.
+    """
+    import re
+
+    import numpy as np
+    import pandas as pd
+    from cooltools import eigs_cis
+
+    from hic_mcp.analysis import compartments, insulation_tads
+    from hic_mcp.data import load_arms_view, load_gc_track, open_matrix, resolve_input_path
+
+    doc = (REPO / "data" / "PROVENANCE.md").read_text()
+
+    ins = insulation_tads(region="chr17:65,000,000-67,000,000", top_n=2)
+    top = ins["top_boundaries"][0]
+    line = re.search(r"- Strongest insulation boundary: (.+)", doc).group(1)
+    assert top["locus"] in line
+    assert f"strength {top['strength']}" in line
+    assert f"log2 insulation {top['log2_insulation']}" in line
+
+    clr = open_matrix(resolve_input_path(None), 100_000, default=100_000)
+    gc = load_gc_track()
+    _, vecs = eigs_cis(clr, phasing_track=gc, view_df=load_arms_view(), n_eigs=1)
+    merged = pd.merge(vecs, gc, on=["chrom", "start", "end"]).dropna(subset=["E1", "GC"])
+    r_live = float(np.corrcoef(merged["E1"], merged["GC"])[0, 1])
+    r_doc = float(re.search(r"Pearson r = ([-0-9.]+) at 100 kb", doc).group(1))
+    assert r_live == pytest.approx(r_doc, abs=5e-4)
+
+    a = compartments(region="chr17:50,100,000-51,100,000")["region_mean_E1"]
+    b = compartments(region="chr17:51,400,000-52,400,000")["region_mean_E1"]
+    flip = re.search(r"- Adjacent compartment flip: (.+)", doc).group(1)
+    assert f"mean E1 {a}" in flip and f"mean E1 {b}" in flip
+
+
+def test_transcript_quotes_are_verbatim_from_the_raw_log():
+    """Every quoted line in TRANSCRIPT.md must appear in the log word for word.
+
+    A paraphrase presented as a quote is the exact failure this document exists to
+    rule out, and one slipped through a hand check ("Now check the" for "Now checking
+    its"). Prose lines are compared; table rows and the prompt are not, since the
+    prompt is the user's and tables are explicitly marked as abridged.
+    """
+    import json
+
+    log = REPO / "demo" / "raw-session.jsonl"
+    said = []
+    for line in log.read_text().splitlines():
+        if not line.strip():
+            continue
+        rec = json.loads(line)
+        if rec.get("type") == "assistant":
+            said += [
+                c["text"] for c in rec["message"]["content"] if c.get("type") == "text"
+            ]
+    blob = " ".join(said).replace("**", "").replace("\u2013", "-").replace("\u2014", "-")
+
+    prompt_marker = "Using the hic-mcp tools"
+    quoted = []
+    for raw in (REPO / "demo" / "TRANSCRIPT.md").read_text().splitlines():
+        if not raw.startswith("> "):
+            continue
+        text = raw[2:].strip()
+        if not text or text.startswith("|") or text.startswith("#") or text.startswith("-"):
+            continue
+        if prompt_marker in text:  # the prompt is the user's line, not the agent's
+            continue
+        quoted.append(text.replace("**", "").replace("\u2013", "-").replace("\u2014", "-"))
+
+    assert quoted, "no prose quotes found - the check would pass vacuously"
+    missing = [q for q in quoted if q not in blob]
+    assert not missing, "quoted but not in the raw log:\n" + "\n".join(missing[:5])

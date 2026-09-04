@@ -17,6 +17,8 @@ from hic_mcp.data import (
     list_resolutions,
     load_arms_view,
     load_gc_track,
+    load_track_file,
+    load_view_file,
     open_matrix,
     parse_region_checked,
     resolve_input_path,
@@ -43,6 +45,21 @@ def _finite(x: float) -> float | None:
     a P(s) curve into a run of identical constants.
     """
     return float(f"{float(x):.6g}") if np.isfinite(x) else None
+
+
+def _resolve_view(path, view: str | None):
+    """A user-supplied view wins; the bundled arm view applies only to the demo file."""
+    if view is not None:
+        return load_view_file(view)
+    return load_arms_view() if is_demo(path) else None
+
+
+def _view_label(view_df, view_arg: str | None, path) -> str:
+    if view_df is None:
+        return "whole chromosomes (no view supplied; pass view= to partition, e.g. by arm)"
+    if view_arg is not None:
+        return f"supplied view ({len(view_df)} regions)"
+    return "chr17 p/q arms (bundled)"
 
 
 def _weights_present(clr: Cooler) -> bool:
@@ -92,7 +109,8 @@ def matrix_summary(file: str | None = None) -> dict:
     return {
         "file": path.name,
         "is_bundled_demo": is_demo(path),
-        "assembly": clr.info.get("genome-assembly") or clr.chromsizes.name or "unknown",
+        # NOT clr.chromsizes.name - that is the pandas Series name ("length"), never an assembly
+        "assembly": clr.info.get("genome-assembly") or "unknown",
         "chromosomes": {str(c): int(s) for c, s in clr.chromsizes.items()},
         "resolutions": per_res,
         "balanced": all(r["balanced"] for r in per_res),
@@ -171,6 +189,7 @@ def insulation_tads(
     region: str | None = None,
     resolution: int | None = None,
     windows_bp: list[int] | None = None,
+    view: str | None = None,
     top_n: int = 10,
 ) -> dict:
     """Diamond insulation score and TAD-boundary calls (Crane et al. 2015 method)."""
@@ -201,8 +220,8 @@ def insulation_tads(
     # the same arm view the sibling tools use: without it cooltools median-normalises
     # the diamond score and measures boundary prominence ACROSS the centromeric gap,
     # which shifts every score by a per-arm offset and can reorder the top boundaries
-    view = load_arms_view() if is_demo(path) else None
-    ins = insulation(clr, windows, view_df=view, verbose=False)
+    view_df = _resolve_view(path, view)
+    ins = insulation(clr, windows, view_df=view_df, verbose=False)
     if region is not None:
         chrom, start, end = parse_region_checked(clr, region)
         ins = ins[(ins["chrom"] == chrom) & (ins["end"] > start) & (ins["start"] < end)]
@@ -236,7 +255,7 @@ def insulation_tads(
     out = {
         "region": region,
         "resolution_used": binsize,
-        "view": "chr17 p/q arms (bundled)" if view is not None else "whole chromosomes",
+        "view": _view_label(view_df, view, path),
         "windows_bp": windows,
         "ranked_by": f"boundary_strength at the {rank_w} bp window",
         "boundary_counts_per_window": counts,
@@ -258,6 +277,8 @@ def compartments(
     file: str | None = None,
     region: str | None = None,
     resolution: int | None = None,
+    view: str | None = None,
+    phasing_track: str | None = None,
 ) -> dict:
     """A/B compartment eigenvector (cis eigendecomposition of the observed/expected map)."""
     path = resolve_input_path(file)
@@ -267,24 +288,39 @@ def compartments(
             "This file has no ICE weights; compartments need a balanced matrix. "
             "Balance it first with `cooler balance`."
         )
-    demo = is_demo(path)
-    phasing = view = None
-    if demo:
-        # the arm view is resolution-independent, so it applies at every resolution;
-        # only the GC phasing track is tied to its own 100 kb binning
-        view = load_arms_view()
-        if int(clr.binsize) == 100_000:
-            phasing = load_gc_track()
+    view_arg_used = view
+    view_df = _resolve_view(path, view_arg_used)
+    if phasing_track is not None:
+        phasing = load_track_file(phasing_track)
+    elif is_demo(path) and int(clr.binsize) == 100_000:
+        # the bundled GC track is tied to its own 100 kb binning
+        phasing = load_gc_track()
+    else:
+        phasing = None
+    if phasing is not None and view_df is not None:
+        # cooltools requires the track to cover EVERY region in the view; without this
+        # check the mismatch surfaces as a raw library error the backstop then
+        # mislabels as an internal bug, when it is really an input the caller can fix
+        covered = set(phasing["chrom"].astype(str))
+        missing = sorted({str(c) for c in view_df["chrom"]} - covered)
+        if missing:
+            raise AnalysisError(
+                f"The phasing track has no values for {', '.join(missing)}, but the view "
+                "includes those regions and every region must be covered. Extend the track, "
+                "or pass a view limited to the regions it covers."
+            )
+    view = view_df
     eigvals, eigvecs = eigs_cis(clr, phasing_track=phasing, view_df=view, n_eigs=3)
     sign_convention = (
         "oriented by the bundled GC track (positive E1 = A = gene-dense/GC-rich)"
         if phasing is not None
-        else "UNPHASED - the sign of E1 is mathematically arbitrary; supply your own "
-        "orientation (e.g. GC or gene density) before calling A vs B"
+        else "UNPHASED - the sign of E1 is mathematically arbitrary. Pass phasing_track "
+        "(a tab-separated chrom/start/end/value file, e.g. GC fraction) to orient it "
+        "before calling A vs B"
     )
     out: dict = {
         "resolution_used": int(clr.binsize),
-        "view": "chr17 p/q arms (bundled)" if view is not None else "whole chromosomes",
+        "view": _view_label(view_df, view_arg_used, path),
         "sign_convention": sign_convention,
         "eigenvalues": [
             {
@@ -317,6 +353,17 @@ def compartments(
                 f"No usable E1 bins in {region} (the region may be entirely ICE-filtered, "
                 "e.g. centromeric)."
             )
+        if view_df is not None:
+            spanned = view_df[
+                (view_df["chrom"] == chrom) & (view_df["end"] > start) & (view_df["start"] < end)
+            ]
+            if len(spanned) > 1:
+                names = ", ".join(str(n) for n in spanned["name"])
+                raise AnalysisError(
+                    f"{chrom}:{start:,}-{end:,} spans {len(spanned)} view regions ({names}). "
+                    "Each is eigendecomposed independently, so averaging their E1 into one "
+                    "A/B call would be meaningless. Ask for a region inside one of them."
+                )
         mean_e1 = float(sub["E1"].mean())
         out["region"] = region
         out["region_mean_E1"] = _finite(mean_e1)
@@ -372,6 +419,7 @@ def virtual_4c(
     file: str | None = None,
     viewpoint: str = "chr17:63,000,000-63,100,000",
     resolution: int | None = None,
+    window_bp: int | None = None,
 ) -> dict:
     """A virtual-4C profile: balanced contact frequency of one viewpoint with everything else."""
     path = resolve_input_path(file)
@@ -440,6 +488,13 @@ def virtual_4c(
             label = _band_label(lo, hi)
             band_means[label] = _finite(sel.mean())
             band_bins[label] = int(sel.size)
+    if window_bp is not None:
+        if window_bp < int(clr.binsize):
+            raise AnalysisError(
+                f"window_bp {window_bp:,} is smaller than one {int(clr.binsize):,} bp bin."
+            )
+        keep = dist <= window_bp
+        vals = np.where(keep, vals, np.nan)
     finite = np.isfinite(vals)
     n = int(finite.sum())
     if n == 0:
@@ -452,6 +507,7 @@ def virtual_4c(
     return {
         "viewpoint": f"{chrom}:{start:,}-{end:,}",
         "resolution_used": int(clr.binsize),
+        "window_bp": window_bp,
         "profile_points": [
             {"start": int(pos[i]), "balanced": _finite(vals[i])} for i in idx
         ],
@@ -480,6 +536,7 @@ def expected_observed(
     file: str | None = None,
     region: str = "chr17:50,000,000-52,500,000",
     resolution: int | None = None,
+    view: str | None = None,
 ) -> dict:
     """Distance-expected contact curve and the observed/expected matrix for a region."""
     path = resolve_input_path(file)
@@ -493,7 +550,8 @@ def expected_observed(
     binsize = int(clr.binsize)
     # the arm view is resolution-independent, so it applies at every resolution - the
     # region model must not change silently with bin size
-    view = load_arms_view() if is_demo(path) else None
+    view_arg = view
+    view = _resolve_view(path, view_arg)
 
     scope_name = chrom
     if view is not None:
@@ -539,7 +597,7 @@ def expected_observed(
         "region": f"{chrom}:{start:,}-{end:,}",
         "resolution_used": binsize,
         "view": (
-            f"{scope_name} (bundled arm view)"
+            f"{scope_name} ({'supplied view' if view_arg else 'bundled arm view'})"
             if view is not None
             else f"{scope_name} (whole chromosome)"
         ),
@@ -554,6 +612,12 @@ def expected_observed(
             {"dist_bp": int(r.dist_bp), "expected": _finite(r.expected)}
             for r in curve.iloc[:: max(1, len(curve) // 100)].itertuples()
         ],
+        "curve_note": (
+            f"{len(curve)} separations were fitted; the points above are every "
+            f"{max(1, len(curve) // 100)}th for transport"
+            if len(curve) > 100
+            else f"all {len(curve)} fitted separations are listed"
+        ),
         "balanced": True,
         "method": (
             "cooltools.expected_cis (smoothed distance-expected, first "

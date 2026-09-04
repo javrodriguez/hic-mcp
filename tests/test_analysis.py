@@ -423,3 +423,100 @@ def test_contact_counts_agree_with_the_file_total():
         resolution=10_000,
     )
     assert "overlap" in ov["counting"]
+
+
+# --- round-5: the advertised road for a user's own file must actually exist -----
+
+
+def test_user_can_supply_a_view_and_a_phasing_track(tmp_path, two_chromosome_cool):
+    """The unphased message names phasing_track; that parameter has to work."""
+    import numpy as np
+    import pandas as pd
+
+    f = two_chromosome_cool
+    view = tmp_path / "view.bed"
+    view.write_text("cA\t0\t600000\tcA_all\ncB\t0\t400000\tcB_all\n")
+    out = insulation_tads(file=f, view=str(view), region="cA:0-500,000", top_n=1)
+    assert "supplied view" in out["view"]
+
+    rng = np.random.default_rng(0)
+    frames = []
+    for chrom, n in (("cA", 60), ("cB", 40)):  # the track must cover every view region
+        frames.append(
+            pd.DataFrame(
+                {
+                    "chrom": [chrom] * n,
+                    "start": np.arange(n) * 10_000,
+                    "end": (np.arange(n) + 1) * 10_000,
+                    "GC": rng.uniform(0.3, 0.6, n),
+                }
+            )
+        )
+    track = tmp_path / "gc.tsv"
+    pd.concat(frames).to_csv(track, sep="\t", index=False)
+    phased = compartments(file=f, view=str(view), phasing_track=str(track), region="cA:0-300,000")
+    assert phased["region_call"] in {"A", "B"}  # a real call, not "unphased"
+    assert "UNPHASED" not in phased["sign_convention"]
+
+
+def test_phasing_track_not_covering_the_view_is_an_agent_readable_error(
+    tmp_path, two_chromosome_cool
+):
+    """cooltools raises a raw error here; the caller needs to know it is fixable input."""
+    import numpy as np
+    import pandas as pd
+
+    view = tmp_path / "view.bed"
+    view.write_text("cA\t0\t600000\tcA_all\ncB\t0\t400000\tcB_all\n")
+    track = tmp_path / "partial.tsv"
+    pd.DataFrame(
+        {
+            "chrom": ["cA"] * 60,
+            "start": np.arange(60) * 10_000,
+            "end": (np.arange(60) + 1) * 10_000,
+            "GC": np.random.default_rng(1).uniform(0.3, 0.6, 60),
+        }
+    ).to_csv(track, sep="\t", index=False)
+    with pytest.raises(AnalysisError, match="no values for cB"):
+        compartments(
+            file=two_chromosome_cool,
+            view=str(view),
+            phasing_track=str(track),
+            region="cA:0-300,000",
+        )
+
+
+def test_bad_view_and_track_files_are_agent_readable(tmp_path, two_chromosome_cool):
+    bad = tmp_path / "bad.bed"
+    bad.write_text("cA\t0\n")
+    with pytest.raises(Exception, match="at least"):
+        insulation_tads(file=two_chromosome_cool, view=str(bad), top_n=1)
+    with pytest.raises(Exception, match="No such view file"):
+        insulation_tads(file=two_chromosome_cool, view=str(tmp_path / "nope.bed"), top_n=1)
+
+
+def test_compartments_refuses_to_average_two_eigendecompositions():
+    """A region spanning both arms gets one A/B call from two independent decompositions."""
+    with pytest.raises(AnalysisError, match="spans 2 view regions"):
+        compartments(region="chr17:20,000,000-30,000,000")
+
+
+def test_assembly_never_leaks_a_pandas_series_name(tiny_unbalanced_cool):
+    """clr.chromsizes.name is 'length'; it must never be reported as an assembly."""
+    out = matrix_summary(file=tiny_unbalanced_cool)
+    assert out["assembly"] == "unknown"
+
+
+def test_virtual4c_window_narrows_the_profile():
+    wide = virtual_4c(viewpoint="chr17:63,000,000-63,100,000")
+    near = virtual_4c(viewpoint="chr17:63,000,000-63,100,000", window_bp=1_000_000)
+    assert near["window_bp"] == 1_000_000
+    assert len(near["profile_points"]) > 0
+    assert max(p["start"] for p in near["profile_points"]) < max(
+        p["start"] for p in wide["profile_points"]
+    )
+
+
+def test_expected_curve_discloses_its_downsampling():
+    out = expected_observed(region=A_BLOCK, resolution=10_000)
+    assert "every" in out["curve_note"] or "all" in out["curve_note"]

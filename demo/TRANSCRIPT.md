@@ -17,7 +17,7 @@ Every quotation below is copied from that file word for word. Where a quote is s
 {"name": "mcp__hic-mcp__insulation_tads", "input": {"top_n": 5}}
 ```
 
-> The strongest boundary is at **chr17:66,180,000-66,190,000** (strength 2.76292, detected across all three diamond windows). Now let's check the compartment call for that locus.
+> The strongest boundary is at **chr17:66,180,000-66,190,000** (strength 2.76292). Now checking its compartment context.
 
 **Turn 2 — it follows up with `compartments` around that locus:**
 
@@ -25,36 +25,35 @@ Every quotation below is copied from that file word for word. Where a quote is s
 {"name": "mcp__hic-mcp__compartments", "input": {"region": "chr17:66,150,000-66,220,000"}}
 ```
 
-**The agent's conclusion — quoted exactly, abridged only where stated here.** Three things are omitted between the header lines and the table: one paragraph ranking the runner-up boundaries, a `## Compartment context` heading, and its one-line intro. The E1 table shows three of its five rows (the outer two, 66,000,000 and 66,400,000, are dropped). Everything below is otherwise complete and unaltered, and the full text is in [`raw-session.jsonl`](raw-session.jsonl):
+**The agent's conclusion — quoted exactly, abridged only where stated here.** The E1 table shows five of its eight rows (the outer three, 65,800,000 / 65,900,000 / 66,500,000, are dropped); one paragraph counting boundaries per window is omitted between the header lines and the compartment section. Everything below is otherwise complete and unaltered, and the full text is in [`raw-session.jsonl`](raw-session.jsonl):
 
-> **Locus:** chr17:66,180,000–66,190,000 (10 kb bin)
-> **Boundary strength:** 2.763 (log2 insulation minimum: −1.659)
-> **Detected by diamond windows:** all three — 100 kb, 250 kb, and 500 kb
+> **Locus:** chr17:66,180,000–66,190,000
+> **Boundary strength:** 2.763 (log2 insulation = −1.637)
+> **Detected by:** all three diamond windows — 100 kb, 250 kb, and 500 kb
 >
-> | bin start | E1 |
-> |---|---|
-> | 66,100,000 | −0.243 |
-> | 66,200,000 | **−0.002** |
-> | 66,300,000 | +0.502 |
+> ### Compartment context
 >
-> The boundary bin (66,180,000–66,190,000) falls in the 66,100,000–66,200,000 bin, where **E1 = −0.243** — a weak **B compartment** call, but E1 is climbing toward zero and flips positive (A) just one bin downstream (66,300,000: E1 = +0.50). The tool explicitly flagged this as a compartment transition rather than clean B territory (region mean E1 over the flanking 2-bin window = −0.123, nominal call "B", but with a `transition_note` warning the sign changes nearby).
+> - **Region call:** B (region mean E1 = −0.1228)
+> - **But flagged as a compartment transition** — the E1 track crosses zero right at this locus:
 >
-> **Bottom line:** the strongest TAD boundary in the demo dataset sits almost exactly at an A/B compartment transition — weakly B on the boundary bin itself, flipping to strongly A immediately downstream. This is a biologically sensible result: TAD boundaries frequently coincide with compartment switches.
+> | bin start | E1 | call |
+> |---|---|---|
+> | 66,000,000 | −0.313 | B |
+> | 66,100,000 | −0.243 | B |
+> | **66,200,000** | **−0.002** | **~boundary** |
+> | 66,300,000 | +0.502 | A |
+> | 66,400,000 | +0.540 | A |
+>
+> **Interpretation:** the strongest TAD boundary in this dataset sits almost exactly at a B→A compartment switch — its immediate 100 kb bin (E1 ≈ −0.12, nominally "B") is really the tail end of the B domain right before it flips to A one bin downstream. So rather than a boundary sitting cleanly inside one compartment, this is a case where insulation and compartmentalization line up: the strongest structural (TAD) boundary coincides with the strongest compartment transition nearby.
 
 ---
 
-## Why this transcript was recaptured
+## Why this log has been re-captured twice
 
-An earlier capture of this same question reached the **opposite** conclusion — that the boundary sat "inside a B-compartment domain … a robust structural boundary rather than a compartment-transition artifact." That was wrong, and the fault was this server's, not the model's.
+**Once because the tools were wrong.** An early capture of this same question concluded the opposite — that the boundary sat "inside a B-compartment domain … rather than a compartment-transition artifact". The fault was this server's: `compartments` reported `region_sign_consistency: 1.0` for a query covering a **single** 100 kb bin. A single bin is trivially consistent with itself, so the figure carried no information, but it reads as confidence and the agent reasonably treated it as such. It never saw that E1 flips sign one bin away. The tools now return `bins_used`, withhold a consistency figure below three bins, and attach a `transition_note` with the flanking track — which is why the session above reads the flip correctly.
 
-The old `compartments` response reported `region_sign_consistency: 1.0` for a query covering a **single** 100 kb bin. A single bin is trivially "100% consistent with itself", so the number carried no information — but it reads as confidence, and the agent reasonably treated it as such. It never saw that E1 flips sign one bin away.
+**Once because the tools changed.** A later fix gave the analyses a chromosome-arm view, which shifts `log2_insulation` by a per-arm constant. The committed log still held pre-fix numbers and field names the code no longer emits. Rather than edit it, the session was run again.
 
-Three things changed in response, and the difference above is the result:
+Both times the rule was the same: **the transcript is never edited to match the code — the session is re-run.** That is the whole point of committing the raw log beside this page. A test now re-derives every documented figure from the live code, so this particular drift fails the build instead of shipping.
 
-- `region_sign_consistency` is now `null` when fewer than three bins support it, with a note saying why.
-- `bins_used` is always reported, so "1 bin" is visible rather than implied.
-- Every region query returns the **flanking** E1 track, and a `transition_note` when the sign changes nearby.
-
-The transcript was not edited to fix the conclusion — the tools were fixed and the session was run again. That distinction is the whole point of committing the raw log: you can check this page against it, and you can re-run the capture yourself.
-
-An external reviewer found this defect, on this repository, by reading the demo it was meant to showcase.
+An external reviewer found both problems, on this repository, by reading the demo it was meant to showcase.

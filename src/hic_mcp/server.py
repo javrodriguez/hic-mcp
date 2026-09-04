@@ -38,6 +38,18 @@ _RESOLUTION = Annotated[
 ]
 
 
+_VIEW = Annotated[
+    str | None,
+    Field(
+        description=(
+            "Path to a tab-separated BED-like region view (chrom/start/end[/name]); each "
+            "region is analysed independently. Omit to use the bundled arm view on the "
+            "demo file, or whole chromosomes on your own file."
+        )
+    ),
+]
+
+
 def _run(fn, /, **kwargs):
     try:
         return fn(**kwargs)
@@ -96,6 +108,7 @@ def insulation_tads(
         list[int] | None,
         Field(description="Diamond window sizes in bp; omit to scale with the bin size"),
     ] = None,
+    view: _VIEW = None,
     top_n: Annotated[int, Field(description="How many strongest boundaries to report")] = 10,
 ) -> models.InsulationTads:
     """Insulation score and TAD-boundary calls (diamond insulation, Crane et al. 2015)."""
@@ -106,6 +119,7 @@ def insulation_tads(
             region=region,
             resolution=resolution,
             windows_bp=windows_bp,
+            view=view,
             top_n=top_n,
         )
     )
@@ -119,10 +133,27 @@ def compartments(
     ] = None,
     file: _FILE = None,
     resolution: _RESOLUTION = None,
+    view: _VIEW = None,
+    phasing_track: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Path to a tab-separated chrom/start/end/value track (e.g. GC fraction) "
+                "that orients the eigenvector so A/B is meaningful on your own file"
+            )
+        ),
+    ] = None,
 ) -> models.Compartments:
     """A/B compartment eigenvector from the cis observed/expected matrix (eigs_cis)."""
     return models.Compartments(
-        **_run(analysis.compartments, file=file, region=region, resolution=resolution)
+        **_run(
+            analysis.compartments,
+            file=file,
+            region=region,
+            resolution=resolution,
+            view=view,
+            phasing_track=phasing_track,
+        )
     )
 
 
@@ -133,10 +164,20 @@ def virtual_4c(
     ],
     file: _FILE = None,
     resolution: _RESOLUTION = None,
+    window_bp: Annotated[
+        int | None,
+        Field(description="Limit the profile to this radius around the viewpoint"),
+    ] = None,
 ) -> models.Virtual4C:
     """Virtual-4C profile: balanced contact frequency of one viewpoint with its chromosome."""
     return models.Virtual4C(
-        **_run(analysis.virtual_4c, file=file, viewpoint=viewpoint, resolution=resolution)
+        **_run(
+            analysis.virtual_4c,
+            file=file,
+            viewpoint=viewpoint,
+            resolution=resolution,
+            window_bp=window_bp,
+        )
     )
 
 
@@ -145,10 +186,17 @@ def expected_observed(
     region: Annotated[str, Field(description="UCSC-style region for the O/E matrix")],
     file: _FILE = None,
     resolution: _RESOLUTION = None,
+    view: _VIEW = None,
 ) -> models.ExpectedObserved:
     """Distance-expected contact curve, P(s) slope, and the observed/expected matrix."""
     return models.ExpectedObserved(
-        **_run(analysis.expected_observed, file=file, region=region, resolution=resolution)
+        **_run(
+            analysis.expected_observed,
+            file=file,
+            region=region,
+            resolution=resolution,
+            view=view,
+        )
     )
 
 

@@ -116,6 +116,7 @@ class ProfilePoint(BaseModel):
 class Virtual4C(BaseModel):
     viewpoint: str
     resolution_used: int
+    window_bp: int | None = Field(default=None, description="Profile limited to this radius")
     profile_points: list[ProfilePoint]
     profile_note: str
     distance_band_means: dict[str, float | None]
@@ -146,6 +147,7 @@ class ExpectedObserved(BaseModel):
         description="Diagonals with no expected measurement; O/E is null there"
     )
     expected_curve_points: list[ExpectedCurvePoint]
+    curve_note: str | None = None
     balanced: bool
     oe_matrix: list[list[float | None]] | None = None
     note: str | None = None

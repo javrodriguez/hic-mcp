@@ -112,6 +112,54 @@ def load_gc_track() -> pd.DataFrame:
     return pd.read_csv(p, sep="\t")
 
 
+def load_view_file(path: str) -> pd.DataFrame:
+    """A user-supplied region view: BED-like, chrom/start/end[/name], tab-separated."""
+    p = Path(path).expanduser()
+    if not p.exists():
+        raise DataError(f"No such view file: {p}. Expected a tab-separated BED-like file.")
+    try:
+        df = pd.read_csv(p, sep="\t", header=None, comment="#")
+    except Exception as e:  # noqa: BLE001 - the message is what the agent acts on
+        raise DataError(f"Could not read view file {p.name}: {e}") from e
+    if df.shape[1] < 3:
+        raise DataError(
+            f"View file {p.name} has {df.shape[1]} column(s); expected at least "
+            "chrom, start, end (tab-separated)."
+        )
+    df = df.iloc[:, :4] if df.shape[1] >= 4 else df.iloc[:, :3]
+    df.columns = ["chrom", "start", "end", "name"][: df.shape[1]]
+    if "name" not in df.columns:
+        df["name"] = df["chrom"].astype(str) + ":" + df["start"].astype(str)
+    df["chrom"] = df["chrom"].astype(str)
+    return df
+
+
+def load_track_file(path: str) -> pd.DataFrame:
+    """A user-supplied phasing track: chrom/start/end/value, tab-separated.
+
+    The fourth column orients the compartment eigenvector (higher = A by convention),
+    e.g. GC fraction or gene density.
+    """
+    p = Path(path).expanduser()
+    if not p.exists():
+        raise DataError(f"No such phasing track: {p}. Expected a tab-separated bedGraph.")
+    first_line = p.read_text(errors="ignore").split("\n", 1)[0].lower()
+    header = 0 if first_line.startswith("chrom") else None
+    try:
+        df = pd.read_csv(p, sep="\t", header=header, comment="#")
+    except Exception as e:  # noqa: BLE001
+        raise DataError(f"Could not read phasing track {p.name}: {e}") from e
+    if df.shape[1] < 4:
+        raise DataError(
+            f"Phasing track {p.name} has {df.shape[1]} column(s); expected chrom, start, "
+            "end and a value column (e.g. GC fraction)."
+        )
+    df = df.iloc[:, :4]
+    df.columns = ["chrom", "start", "end", df.columns[3] if header == 0 else "value"]
+    df["chrom"] = df["chrom"].astype(str)
+    return df
+
+
 def load_arms_view() -> pd.DataFrame:
     """The bundled chr17 p/q arm view for the demo file."""
     p = data_dir() / ARMS_FILENAME
