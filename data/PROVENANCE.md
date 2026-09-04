@@ -15,7 +15,8 @@ md5 of the shipped file: `5ab48158f49d8fba2c8ca46076989980`.
 
 ## How the subset was made
 
-`python scripts/make_demo_subset.py --out /tmp/rebuild.mcool --verify-against data/hff_microc_chr17_hg38.mcool`
+`uv run python scripts/make_demo_subset.py --out /tmp/rebuild.mcool --verify-against data/hff_microc_chr17_hg38.mcool`
+(the `uv run` prefix matters — the script needs the project's cooler/cooltools environment)
 
 The script downloads and md5-verifies the source, extracts the chr17 cis pixel block at the 10 kb base resolution, rebases the bin table, coarsens to 100 kb and 1 Mb, and recomputes ICE balancing at every level (the source's genome-wide weights are invalid once chr2 is dropped).
 The rebuilt pixel and bin tables are identical to the shipped file at every resolution; only the embedded creation date differs, so verification compares tables, never file md5s.

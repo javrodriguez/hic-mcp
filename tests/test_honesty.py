@@ -213,40 +213,36 @@ def test_documented_landmarks_are_re_derived_from_live_code():
     assert f"mean E1 {a}" in flip and f"mean E1 {b}" in flip
 
 
-def test_transcript_quotes_are_verbatim_from_the_raw_log():
-    """Every quoted line in TRANSCRIPT.md must appear in the log word for word.
+def test_transcript_quotes_the_conclusion_completely_and_unaltered():
+    """The conclusion block must equal the log's final answer exactly - no cuts at all.
 
-    A paraphrase presented as a quote is the exact failure this document exists to
-    rule out, and one slipped through a hand check ("Now check the" for "Now checking
-    its"). Prose lines are compared; table rows and the prompt are not, since the
-    prompt is the user's and tables are explicitly marked as abridged.
+    An earlier version declared its cuts in prose and asked a test to police the claim,
+    but a test can verify that quoted lines EXIST in the log while being structurally
+    blind to lines silently left out. Quoting the answer whole removes the class: the
+    check below is equality, not containment.
     """
     import json
 
-    log = REPO / "demo" / "raw-session.jsonl"
     said = []
-    for line in log.read_text().splitlines():
+    for line in (REPO / "demo" / "raw-session.jsonl").read_text().splitlines():
         if not line.strip():
             continue
         rec = json.loads(line)
         if rec.get("type") == "assistant":
-            said += [
-                c["text"] for c in rec["message"]["content"] if c.get("type") == "text"
-            ]
-    blob = " ".join(said).replace("**", "").replace("\u2013", "-").replace("\u2014", "-")
+            said += [c["text"] for c in rec["message"]["content"] if c.get("type") == "text"]
+    final = said[-1].strip()
 
-    prompt_marker = "Using the hic-mcp tools"
-    quoted = []
-    for raw in (REPO / "demo" / "TRANSCRIPT.md").read_text().splitlines():
-        if not raw.startswith("> "):
-            continue
-        text = raw[2:].strip()
-        if not text or text.startswith("|") or text.startswith("#") or text.startswith("-"):
-            continue
-        if prompt_marker in text:  # the prompt is the user's line, not the agent's
-            continue
-        quoted.append(text.replace("**", "").replace("\u2013", "-").replace("\u2014", "-"))
+    transcript = (REPO / "demo" / "TRANSCRIPT.md").read_text()
+    marker = "**The agent's conclusion, in full"
+    assert marker in transcript, "the conclusion block is no longer quoted in full"
+    after = transcript[transcript.index(marker) :]
+    block = after[after.index("\n\n") + 2 : after.index("\n\n---")]
 
-    assert quoted, "no prose quotes found - the check would pass vacuously"
-    missing = [q for q in quoted if q not in blob]
-    assert not missing, "quoted but not in the raw log:\n" + "\n".join(missing[:5])
+    unquoted = "\n".join(
+        ln[2:] if ln.startswith("> ") else ("" if ln.strip() == ">" else ln)
+        for ln in block.splitlines()
+    ).strip()
+    assert unquoted == final, (
+        "the quoted conclusion differs from the raw log - re-run scripts/capture_demo.py "
+        "and re-quote it whole rather than editing either one"
+    )

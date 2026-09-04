@@ -117,8 +117,12 @@ def load_view_file(path: str) -> pd.DataFrame:
     p = Path(path).expanduser()
     if not p.exists():
         raise DataError(f"No such view file: {p}. Expected a tab-separated BED-like file.")
+    # sniff a header row: the README names chrom/start/end/name and the bundled
+    # track ships with one, so a file in exactly the documented shape must load
+    first_line = p.read_text(errors="ignore").split("\n", 1)[0].lower()
+    header = 0 if first_line.startswith(("chrom", "#chrom")) else None
     try:
-        df = pd.read_csv(p, sep="\t", header=None, comment="#")
+        df = pd.read_csv(p, sep="\t", header=header, comment="#")
     except Exception as e:  # noqa: BLE001 - the message is what the agent acts on
         raise DataError(f"Could not read view file {p.name}: {e}") from e
     if df.shape[1] < 3:
@@ -131,6 +135,15 @@ def load_view_file(path: str) -> pd.DataFrame:
     if "name" not in df.columns:
         df["name"] = df["chrom"].astype(str) + ":" + df["start"].astype(str)
     df["chrom"] = df["chrom"].astype(str)
+    for col in ("start", "end"):
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    if df[["start", "end"]].isna().any().any():
+        raise DataError(
+            f"View file {p.name} has non-numeric start/end values. Expected tab-separated "
+            "chrom, start, end (an optional name column is allowed, and a header row is fine)."
+        )
+    df["start"] = df["start"].astype(int)
+    df["end"] = df["end"].astype(int)
     return df
 
 

@@ -171,8 +171,11 @@ def test_compartment_eigenvector_correlates_with_gc():
 
 
 def test_compartments_centromere_region_is_a_clear_error():
-    with pytest.raises(AnalysisError, match="ICE-filtered"):
+    """The centromere is BOTH outside every arm and unmappable - say both."""
+    with pytest.raises(AnalysisError) as e:
         compartments(region="chr17:23,000,000-26,000,000")
+    assert "not contained in any single region of the view" in str(e.value)
+    assert "ICE-filtered" in str(e.value)
 
 
 def test_compartments_genome_summary():
@@ -312,8 +315,11 @@ def test_expected_curve_tail_is_not_flattened_by_rounding():
 
 
 def test_expected_region_straddling_the_centromere_is_a_clear_error():
-    with pytest.raises(AnalysisError, match="not contained in a single chromosome arm"):
+    """Names the arms it is not inside, and offers them as the road forward."""
+    with pytest.raises(AnalysisError) as e:
         expected_observed(region="chr17:20,000,000-25,000,000")
+    assert "not contained in any single region of the view" in str(e.value)
+    assert "chr17p" in str(e.value) and "chr17q" in str(e.value)
 
 
 # --- every tool names its method (honest-output invariant) ------------------
@@ -366,8 +372,11 @@ def test_insulation_refuses_an_unmeasurable_region_rather_than_reporting_zero():
     The sibling tools already refuse on this exact region, so answering here would be
     the one inconsistent - and quietly misleading - surface.
     """
-    with pytest.raises(AnalysisError, match="no measurement"):
+    with pytest.raises(AnalysisError) as e:
         insulation_tads(region="chr17:23,000,000-25,000,000")
+    # the view check fires first and is the more precise diagnosis, but it must still
+    # tell the caller the bins carry no signal - both facts, not one
+    assert "ICE-filtered" in str(e.value)
 
 
 def test_compartment_view_does_not_change_with_resolution():
@@ -497,8 +506,10 @@ def test_bad_view_and_track_files_are_agent_readable(tmp_path, two_chromosome_co
 
 def test_compartments_refuses_to_average_two_eigendecompositions():
     """A region spanning both arms gets one A/B call from two independent decompositions."""
-    with pytest.raises(AnalysisError, match="spans 2 view regions"):
+    with pytest.raises(AnalysisError) as e:
         compartments(region="chr17:20,000,000-30,000,000")
+    # caught by the view-containment check, which names both arms
+    assert "chr17p" in str(e.value) and "chr17q" in str(e.value)
 
 
 def test_assembly_never_leaks_a_pandas_series_name(tiny_unbalanced_cool):
@@ -520,3 +531,69 @@ def test_virtual4c_window_narrows_the_profile():
 def test_expected_curve_discloses_its_downsampling():
     out = expected_observed(region=A_BLOCK, resolution=10_000)
     assert "every" in out["curve_note"] or "all" in out["curve_note"]
+
+
+# --- round-6: the bring-your-own-file road, where every finding landed ----------
+
+
+def test_view_file_with_the_documented_header_is_accepted(tmp_path, two_chromosome_cool):
+    """The README names chrom/start/end/name; a file in that exact shape must load."""
+    view = tmp_path / "view.bed"
+    view.write_text("chrom\tstart\tend\tname\ncA\t0\t600000\tcA_all\ncB\t0\t400000\tcB_all\n")
+    out = insulation_tads(file=two_chromosome_cool, view=str(view), region="cA:0-500,000", top_n=1)
+    assert "supplied view" in out["view"]
+
+
+def test_view_naming_chromosomes_the_file_lacks_is_named_as_such(tmp_path, two_chromosome_cool):
+    """'17' and 'chr17' are different names, and the caller can fix that."""
+    view = tmp_path / "bad.bed"
+    view.write_text("17\t0\t600000\tx\n")
+    with pytest.raises(AnalysisError, match="does not"):
+        insulation_tads(file=two_chromosome_cool, view=str(view), top_n=1)
+
+
+def test_region_outside_the_view_is_not_blamed_on_the_data(tmp_path, two_chromosome_cool):
+    """Blaming ICE filtering for mappable bins sends the caller hunting a phantom."""
+    view = tmp_path / "part.bed"
+    view.write_text("cA\t0\t300000\tcA_part\n")
+    outside = "cA:400,000-500,000"
+    f = two_chromosome_cool
+    v = str(view)
+    for tool in (insulation_tads, compartments, expected_observed):
+        with pytest.raises(AnalysisError, match="not contained in any single region of the view"):
+            tool(file=f, view=v, region=outside)
+
+
+def test_phasing_coverage_is_checked_without_a_view_too(tmp_path, two_chromosome_cool):
+    """The no-view case IS the default for a user's own file; it must be guarded."""
+    import numpy as np
+    import pandas as pd
+
+    track = tmp_path / "partial.tsv"
+    pd.DataFrame(
+        {
+            "chrom": ["cA"] * 60,
+            "start": np.arange(60) * 10_000,
+            "end": (np.arange(60) + 1) * 10_000,
+            "GC": np.random.default_rng(2).uniform(0.3, 0.6, 60),
+        }
+    ).to_csv(track, sep="\t", index=False)
+    with pytest.raises(AnalysisError, match="no values for cB"):
+        compartments(file=two_chromosome_cool, phasing_track=str(track), region="cA:0-300,000")
+
+
+def test_virtual4c_window_excludes_separations_from_the_bands_too():
+    """Band means must not summarise separations the caller removed."""
+    out = virtual_4c(viewpoint="chr17:63,000,000-63,100,000", window_bp=1_000_000)
+    assert set(out["distance_band_means"]) == {"0kb-100kb", "100kb-1Mb"}
+    assert "1Mb-5Mb" not in out["distance_band_bins"]  # absent, not reported as zero
+    assert "limited to 1,000,000 bp" in out["coverage_note"]
+    assert "whole chromosome" not in out["coverage_note"]
+
+
+def test_all_null_balanced_matrix_explains_itself():
+    """A wall of nulls beside balanced:true reads like a result; it must not."""
+    out = contacts_at_locus(region="chr17:23,000,000-23,300,000", resolution=10_000)
+    assert out["balanced_matrix"] is not None
+    assert all(v is None for row in out["balanced_matrix"] for v in row)
+    assert "ICE-filtered" in out["note"]

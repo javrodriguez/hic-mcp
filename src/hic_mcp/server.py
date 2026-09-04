@@ -129,7 +129,12 @@ def insulation_tads(
 def compartments(
     region: Annotated[
         str | None,
-        Field(description="Report the A/B call and E1 for this region; omit for a genome summary"),
+        Field(
+            description=(
+                "Report the A/B call and E1 for this region; omit for a summary over the "
+                "whole file (which may be a single chromosome)"
+            )
+        ),
     ] = None,
     file: _FILE = None,
     resolution: _RESOLUTION = None,

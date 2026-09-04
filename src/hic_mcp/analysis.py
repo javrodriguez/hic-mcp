@@ -47,11 +47,63 @@ def _finite(x: float) -> float | None:
     return float(f"{float(x):.6g}") if np.isfinite(x) else None
 
 
-def _resolve_view(path, view: str | None):
+def _resolve_view(path, view: str | None, clr: Cooler | None = None):
     """A user-supplied view wins; the bundled arm view applies only to the demo file."""
     if view is not None:
-        return load_view_file(view)
+        view_df = load_view_file(view)
+        if clr is not None:
+            unknown = sorted(set(view_df["chrom"]) - set(map(str, clr.chromnames)))
+            if unknown:
+                raise AnalysisError(
+                    f"The view names {', '.join(unknown)}, which this file does not "
+                    f"contain (it has: {', '.join(map(str, clr.chromnames[:10]))}). "
+                    "Chromosome names must match the file exactly - '17' and 'chr17' "
+                    "are different names."
+                )
+        return view_df
     return load_arms_view() if is_demo(path) else None
+
+
+def _check_region_in_view(view_df, chrom: str, start: int, end: int, clr=None) -> None:
+    """A region outside the supplied view is a fixable request, not bad data.
+
+    Without this the tools blame ICE filtering for bins that carry perfectly good
+    weights, which sends the caller looking for a data problem that does not exist.
+    """
+    if view_df is None:
+        return
+    covering = view_df[
+        (view_df["chrom"] == chrom) & (view_df["start"] <= start) & (view_df["end"] >= end)
+    ]
+    if len(covering):
+        return
+    same_chrom = view_df[view_df["chrom"] == chrom]
+    if len(same_chrom):
+        spans = "; ".join(
+            f"{r['name']} {int(r['start']):,}-{int(r['end']):,}" for _, r in same_chrom.iterrows()
+        )
+        where = f"Regions covering {chrom}: {spans}."
+    else:
+        where = f"The view covers no part of {chrom} at all."
+    # if the gap it falls in is also unmappable, say that too - for an arm view the
+    # space between regions IS the centromere, and the caller deserves both facts
+    why = ""
+    if clr is not None and _weights_present(clr):
+        try:
+            w = clr.bins().fetch(f"{chrom}:{start}-{end}")["weight"]
+            if w.isna().all():
+                why = (
+                    " Its bins are also entirely ICE-filtered (no balanced signal exists "
+                    "there) - for an arm view, the space between regions is the "
+                    "centromeric gap."
+                )
+        except ValueError:
+            pass
+    raise AnalysisError(
+        f"{chrom}:{start:,}-{end:,} is not contained in any single region of the view "
+        f"being used, so no result applies to it.{why} {where} Ask for a region inside "
+        "one of them, or supply a view that covers this one."
+    )
 
 
 def _view_label(view_df, view_arg: str | None, path) -> str:
@@ -174,6 +226,14 @@ def contacts_at_locus(
         out["balanced_max"] = _finite(finite_bal.max()) if finite_bal.size else None
         if max(bal.shape) <= MATRIX_BIN_CAP:
             out["balanced_matrix"] = [[_finite(v) for v in row] for row in bal]
+            if not np.isfinite(bal).any():
+                # a wall of nulls with balanced:true reads like a result; it is not
+                out["note"] = (
+                    f"Every balanced value is null: the bins in {r1} are ICE-filtered "
+                    "(centromeric or low-mappability), so no balanced contact frequency "
+                    "exists there. The raw counts above are unnormalised and not "
+                    "comparable with balanced values elsewhere."
+                )
         else:
             out["balanced_matrix"] = None
             out["note"] = (
@@ -220,10 +280,11 @@ def insulation_tads(
     # the same arm view the sibling tools use: without it cooltools median-normalises
     # the diamond score and measures boundary prominence ACROSS the centromeric gap,
     # which shifts every score by a per-arm offset and can reorder the top boundaries
-    view_df = _resolve_view(path, view)
+    view_df = _resolve_view(path, view, clr)
     ins = insulation(clr, windows, view_df=view_df, verbose=False)
     if region is not None:
         chrom, start, end = parse_region_checked(clr, region)
+        _check_region_in_view(view_df, chrom, start, end, clr)
         ins = ins[(ins["chrom"] == chrom) & (ins["end"] > start) & (ins["start"] < end)]
         # "0 boundaries" is an ANSWER; a region with no insulation score at all is a
         # refusal, and the sibling tools already refuse on exactly this input
@@ -289,7 +350,7 @@ def compartments(
             "Balance it first with `cooler balance`."
         )
     view_arg_used = view
-    view_df = _resolve_view(path, view_arg_used)
+    view_df = _resolve_view(path, view_arg_used, clr)
     if phasing_track is not None:
         phasing = load_track_file(phasing_track)
     elif is_demo(path) and int(clr.binsize) == 100_000:
@@ -297,17 +358,23 @@ def compartments(
         phasing = load_gc_track()
     else:
         phasing = None
-    if phasing is not None and view_df is not None:
-        # cooltools requires the track to cover EVERY region in the view; without this
-        # check the mismatch surfaces as a raw library error the backstop then
-        # mislabels as an internal bug, when it is really an input the caller can fix
+    if phasing is not None:
+        # cooltools requires the track to cover EVERY region it decomposes. With no view
+        # that means every chromosome in the FILE - which is the default for a user's own
+        # file, so gating this check on a view left the common case unguarded.
         covered = set(phasing["chrom"].astype(str))
-        missing = sorted({str(c) for c in view_df["chrom"]} - covered)
+        if view_df is not None:
+            needed = {str(c) for c in view_df["chrom"]}
+            scope = "the view includes those regions"
+        else:
+            needed = {str(c) for c in clr.chromnames}
+            scope = "with no view supplied, every chromosome in the file is decomposed"
+        missing = sorted(needed - covered)
         if missing:
             raise AnalysisError(
-                f"The phasing track has no values for {', '.join(missing)}, but the view "
-                "includes those regions and every region must be covered. Extend the track, "
-                "or pass a view limited to the regions it covers."
+                f"The phasing track has no values for {', '.join(missing)}, and "
+                f"{scope} - every one must be covered. Extend the track, or pass a view "
+                "limited to the regions it covers."
             )
     view = view_df
     eigvals, eigvecs = eigs_cis(clr, phasing_track=phasing, view_df=view, n_eigs=3)
@@ -347,6 +414,7 @@ def compartments(
     vec = eigvecs.dropna(subset=["E1"])
     if region is not None:
         chrom, start, end = parse_region_checked(clr, region)
+        _check_region_in_view(view_df, chrom, start, end, clr)
         sub = vec[(vec["chrom"] == chrom) & (vec["end"] > start) & (vec["start"] < end)]
         if sub.empty:
             raise AnalysisError(
@@ -465,6 +533,17 @@ def virtual_4c(
     # the profile was filtered to the viewpoint's chromosome, so every mask below must
     # be built from the SAME rows - indexing against the whole-genome bin table breaks
     # on any multi-chromosome file
+    if window_bp is not None:
+        # applied BEFORE the band means, or they would summarise separations the caller
+        # explicitly excluded and that appear nowhere in the returned profile
+        if window_bp < int(clr.binsize):
+            raise AnalysisError(
+                f"window_bp {window_bp:,} is smaller than one {int(clr.binsize):,} bp bin."
+            )
+        in_window = dist <= window_bp
+        vals = np.where(in_window, vals, np.nan)
+    else:
+        in_window = np.ones(vals.shape, dtype=bool)
     all_bins = clr.bins()[:]
     all_bins = all_bins[all_bins["chrom"].astype(str) == chrom].reset_index(drop=True)
     weights = all_bins["weight"].to_numpy()
@@ -481,20 +560,15 @@ def virtual_4c(
     band_means = {}
     band_bins = {}
     for lo, hi in bands:
-        in_band = (dist >= lo) & (dist < hi) & mappable & ~own
+        # a band the window excluded is ABSENT, not zero: reporting 0.0 for separations
+        # the caller removed would be inventing a measurement
+        in_band = (dist >= lo) & (dist < hi) & mappable & ~own & in_window
         sel = usable[in_band]
         sel = sel[np.isfinite(sel)]
         if sel.size:
             label = _band_label(lo, hi)
             band_means[label] = _finite(sel.mean())
             band_bins[label] = int(sel.size)
-    if window_bp is not None:
-        if window_bp < int(clr.binsize):
-            raise AnalysisError(
-                f"window_bp {window_bp:,} is smaller than one {int(clr.binsize):,} bp bin."
-            )
-        keep = dist <= window_bp
-        vals = np.where(keep, vals, np.nan)
     finite = np.isfinite(vals)
     n = int(finite.sum())
     if n == 0:
@@ -523,9 +597,16 @@ def virtual_4c(
         "distance_band_bins": band_bins,
         "distance_bands_cover_bp": [0, bands[-1][1]],
         "coverage_note": (
-            f"Band means summarise separations up to {bands[-1][1] // 1_000_000} Mb; the "
-            f"profile itself spans the whole chromosome "
-            f"({int(clr.chromsizes[chrom]) // 1_000_000} Mb here)."
+            (
+                f"Both the profile and the band means are limited to {window_bp:,} bp "
+                "around the viewpoint, as requested."
+            )
+            if window_bp is not None
+            else (
+                f"Band means summarise separations up to {bands[-1][1] // 1_000_000} Mb; "
+                "the profile itself spans the whole chromosome "
+                f"({int(clr.chromsizes[chrom]) // 1_000_000} Mb here)."
+            )
         ),
         "balanced": True,
         "method": "cooltools.virtual4c (balanced row extraction at the viewpoint)",
@@ -551,22 +632,13 @@ def expected_observed(
     # the arm view is resolution-independent, so it applies at every resolution - the
     # region model must not change silently with bin size
     view_arg = view
-    view = _resolve_view(path, view_arg)
+    view = _resolve_view(path, view_arg, clr)
 
     scope_name = chrom
     if view is not None:
+        # raises with the view's own regions named - never invents a centromere
+        _check_region_in_view(view, chrom, start, end, clr)
         row = view[(view["chrom"] == chrom) & (view["start"] <= start) & (view["end"] >= end)]
-        if not len(row):
-            arms = "; ".join(
-                f"{r['name']} {int(r['start']):,}-{int(r['end']):,}"
-                for _, r in view[view["chrom"] == chrom].iterrows()
-            )
-            raise AnalysisError(
-                f"{chrom}:{start:,}-{end:,} is not contained in a single chromosome arm, "
-                "so no single expected curve applies (the arms are separated by the "
-                f"ICE-filtered centromeric gap). Arms here: {arms}. Request a region "
-                "inside one arm."
-            )
         scope_name = str(row.iloc[0]["name"])
 
     exp = expected_cis(clr, view_df=view, ignore_diags=IGNORE_DIAGS, nproc=1)
