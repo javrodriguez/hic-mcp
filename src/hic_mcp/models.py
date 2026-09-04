@@ -32,6 +32,7 @@ class ContactsAtLocus(BaseModel):
     resolution_used: int
     shape_bins: list[int]
     raw_contacts_sum: int
+    counting: str = Field(description="The counting convention behind raw_contacts_sum")
     raw_contacts_max: int
     nonzero_fraction: float
     balanced: bool
@@ -67,8 +68,9 @@ class InsulationTads(BaseModel):
 class ArmEigenvalue(BaseModel):
     region: str
     eigval1: float | None
-    variance_share: float | None = Field(
-        default=None, description="Scale-free counterpart to eigval1; compare regions by this"
+    eigval1_share_of_top3: float | None = Field(
+        default=None,
+        description="eigval1 over the absolute sum of the three computed eigenvalues",
     )
 
 
@@ -93,11 +95,14 @@ class Compartments(BaseModel):
     confidence_note: str | None = None
     transition_note: str | None = None
     E1_track: list[E1Point] | None = None
-    genome_A_fraction: float | None = Field(
+    A_fraction_of_file: float | None = Field(
         default=None, description="Only set when the eigenvector is phased; null otherwise"
     )
-    positive_E1_fraction: float | None = Field(
+    positive_E1_fraction_of_file: float | None = Field(
         default=None, description="Sign-neutral counterpart reported when unphased"
+    )
+    fraction_scope: str | None = Field(
+        default=None, description="What the fraction covers - the file, not a genome"
     )
     bins_used: int | None = None
     method: str

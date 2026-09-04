@@ -20,6 +20,9 @@ from hic_mcp.analysis import (
 )
 
 BOUNDARY_LOCUS = "chr17:66,180,000-66,190,000"
+# P(s) slopes at 100 kb, per arm (measured on the shipped file; one constant per quantity)
+P_ARM_SLOPE_100KB = -1.16246
+Q_ARM_SLOPE_100KB = -1.24074
 A_BLOCK = "chr17:50,100,000-51,100,000"
 B_BLOCK = "chr17:51,400,000-52,400,000"
 
@@ -46,7 +49,9 @@ def test_matrix_summary_ground_truth():
 
 def test_contacts_ground_truth_exact_raw_sum():
     out = contacts_at_locus(region="chr17:45,000,000-46,000,000", resolution=10_000)
-    assert out["raw_contacts_sum"] == 2_323_926  # exact: measured integer sum
+    # exact integer sum, each contact once (upper triangle incl. diagonal); the whole
+    # symmetric square summed instead would read 2,323,926
+    assert out["raw_contacts_sum"] == 1_890_939
     assert out["raw_contacts_max"] == 28_614
     assert out["resolution_used"] == 10_000
     assert out["balanced"] is True
@@ -172,7 +177,8 @@ def test_compartments_centromere_region_is_a_clear_error():
 
 def test_compartments_genome_summary():
     out = compartments()
-    assert 0.2 < out["genome_A_fraction"] < 0.8
+    assert 0.2 < out["A_fraction_of_file"] < 0.8
+    assert "chr17" in out["fraction_scope"]
     assert out["bins_used"] > 500
 
 
@@ -180,8 +186,8 @@ def test_compartments_never_claims_an_A_fraction_when_unphased():
     """An arbitrary sign cannot support an 'A fraction' - the field must stay null."""
     out = compartments(resolution=1_000_000)  # phasing track exists only at 100 kb
     assert "UNPHASED" in out["sign_convention"]
-    assert out["genome_A_fraction"] is None
-    assert 0.0 < out["positive_E1_fraction"] < 1.0
+    assert out["A_fraction_of_file"] is None
+    assert 0.0 < out["positive_E1_fraction_of_file"] < 1.0
 
 
 # --- virtual_4c ------------------------------------------------------------
@@ -246,7 +252,9 @@ def test_expected_ps_slope_ground_truth():
     out = expected_observed(region=A_BLOCK)  # default 100 kb
     assert out["ignored_diagonals"] == 2
     assert out["ps_fit_range_bp"] == [200_000, 10_000_000]  # starts past the masked head
-    assert out["ps_slope"] == pytest.approx(-1.2254, rel=0.05)
+    # chr17q at 100 kb, per-arm expected: the ONE value for this quantity, pinned tightly
+    # (a wider band once hid a 0.015 drift between two tests of the same number)
+    assert out["ps_slope"] == pytest.approx(Q_ARM_SLOPE_100KB, rel=0.01)
     assert len(out["expected_curve_points"]) > 20
     # the masked head must not appear in the reported curve
     assert min(p["dist_bp"] for p in out["expected_curve_points"]) >= 200_000
@@ -254,9 +262,9 @@ def test_expected_ps_slope_ground_truth():
 
 def test_expected_ps_slope_is_negative_at_every_resolution():
     """Contact frequency falls with distance; a positive slope means a contaminated fit."""
-    for res, expected in ((10_000, -1.2416), (100_000, -1.2254), (1_000_000, -1.0547)):
+    for res, expected in ((10_000, -1.25937), (100_000, Q_ARM_SLOPE_100KB), (1_000_000, -1.07962)):
         out = expected_observed(region=A_BLOCK, resolution=res)
-        assert out["ps_slope"] == pytest.approx(expected, rel=0.08), res
+        assert out["ps_slope"] == pytest.approx(expected, rel=0.02), res
         assert out["ps_fit_range_bp"][0] >= 2 * res
 
 
@@ -290,8 +298,8 @@ def test_expected_curve_is_scoped_to_the_region_not_the_whole_file():
     assert p_arm["view"].startswith("chr17p")
     assert q_arm["view"].startswith("chr17q")
     assert p_arm["ps_slope"] != q_arm["ps_slope"]
-    assert p_arm["ps_slope"] == pytest.approx(-1.1625, rel=0.05)
-    assert q_arm["ps_slope"] == pytest.approx(-1.2407, rel=0.05)
+    assert p_arm["ps_slope"] == pytest.approx(P_ARM_SLOPE_100KB, rel=0.01)
+    assert q_arm["ps_slope"] == pytest.approx(Q_ARM_SLOPE_100KB, rel=0.01)
     assert "not only the requested region" in p_arm["curve_scope"]
 
 
@@ -339,6 +347,10 @@ def test_every_tool_works_on_a_multi_chromosome_file(two_chromosome_cool):
     v = virtual_4c(file=f, viewpoint="cA:200,000-210,000")
     assert v["distance_band_means"], "virtual_4c returned no bands"
     assert all(x is not None for x in v["distance_band_means"].values())
+    c = compartments(file=f, region="cA:0-300,000")
+    assert c["bins_used"] > 0 and "UNPHASED" in c["sign_convention"]
+    e = expected_observed(file=f, region="cA:0-300,000")
+    assert e["view"].startswith("cA") and e["expected_curve_points"]
 
 
 def test_virtual4c_profile_stays_on_the_viewpoint_chromosome(two_chromosome_cool):
@@ -395,3 +407,19 @@ def test_virtual4c_never_returns_an_empty_profile_silently():
     out = virtual_4c(viewpoint="chr17:63,000,000-63,100,000")
     assert out["profile_points"]
     assert "every 1th" not in out["profile_note"]
+
+
+def test_contact_counts_agree_with_the_file_total():
+    """One counting convention: a whole-chromosome region must sum to matrix_summary's
+    total, which counts each contact once. A symmetric square summed whole would not."""
+    total = matrix_summary()["resolutions"][0]["total_contacts"]
+    whole = contacts_at_locus(region="chr17", resolution=1_000_000)
+    assert whole["raw_contacts_sum"] == total
+    assert "counted once" in whole["counting"]
+    # two overlapping regions say so, rather than double-counting in silence
+    ov = contacts_at_locus(
+        region="chr17:50,000,000-50,500,000",
+        region2="chr17:50,200,000-50,700,000",
+        resolution=10_000,
+    )
+    assert "overlap" in ov["counting"]

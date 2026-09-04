@@ -126,12 +126,24 @@ def contacts_at_locus(
     r1 = f"{chrom}:{start}-{end}"
     r2 = f"{c2}:{s2}-{e2}"
     raw = clr.matrix(balance=False).fetch(r1, r2)
+    # One counting convention, the file's own: each contact counted once. A single
+    # region comes back as a symmetric square, so summing it whole would count every
+    # off-diagonal contact twice and disagree with matrix_summary on the same data.
+    if region2 is None:
+        raw_once = np.triu(np.nan_to_num(raw))
+        counting = "each contact counted once (upper triangle incl. diagonal)"
+    else:
+        raw_once = np.nan_to_num(raw)
+        counting = "each pixel of the region x region2 block counted once"
+        if c2 == chrom and s2 < end and start < e2:
+            counting += " - the regions overlap, so contacts inside the overlap appear twice"
     out: dict = {
         "region": r1,
         "region2": r2 if region2 is not None else None,
         "resolution_used": resolution,
         "shape_bins": list(raw.shape),
-        "raw_contacts_sum": int(np.nansum(raw)),
+        "raw_contacts_sum": int(raw_once.sum()),
+        "counting": counting,
         "raw_contacts_max": int(np.nanmax(raw)) if raw.size else 0,
         "nonzero_fraction": round(float((raw > 0).mean()), 4) if raw.size else 0.0,
         "balanced": use_weights,
@@ -280,7 +292,7 @@ def compartments(
                 "eigval1": _finite(r["eigval1"]),
                 # raw eigenvalues scale with region size, so a bigger arm always looks
                 # "stronger"; the share is the comparable number
-                "variance_share": _finite(
+                "eigval1_share_of_top3": _finite(
                     abs(r["eigval1"])
                     / sum(abs(r[f"eigval{i}"]) for i in (1, 2, 3))
                 ),
@@ -289,8 +301,9 @@ def compartments(
         ],
         "eigenvalue_note": (
             "eigval1 is unnormalised and grows with region size, so a longer arm always "
-            "looks 'stronger'. variance_share is eigval1 as a fraction of the top three "
-            "eigenvalues' absolute weight - use that to compare regions."
+            "looks 'stronger'. eigval1_share_of_top3 is eigval1 as a fraction of the three "
+            "computed eigenvalues' absolute weight - a scale-free way to compare regions, "
+            "not a share of total variance."
         ),
         "balanced": True,
         "method": "cooltools.eigs_cis (eigendecomposition of the cis observed/expected matrix)",
@@ -340,12 +353,17 @@ def compartments(
                 )
     else:
         positive_fraction = round(float((vec["E1"] > 0).mean()), 3)
+        # the fraction covers whatever the FILE holds - one chromosome for the demo - so
+        # its name says "file", never "genome"
         if phasing is not None:
-            out["genome_A_fraction"] = positive_fraction
+            out["A_fraction_of_file"] = positive_fraction
         else:
-            # unphased: the sign is arbitrary, so "A fraction" would be an unfounded claim
-            out["genome_A_fraction"] = None
-            out["positive_E1_fraction"] = positive_fraction
+            # unphased: the sign is arbitrary, so an "A fraction" would be an unfounded claim
+            out["A_fraction_of_file"] = None
+            out["positive_E1_fraction_of_file"] = positive_fraction
+        out["fraction_scope"] = (
+            f"all usable bins in the file ({', '.join(str(c) for c in clr.chromnames)})"
+        )
         out["bins_used"] = int(len(vec))
     return out
 
