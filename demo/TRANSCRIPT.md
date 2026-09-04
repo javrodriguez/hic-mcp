@@ -55,15 +55,6 @@ Every quotation below is copied from that file word for word, and the agent's co
 >
 > **Interpretation:** the strongest TAD boundary in this dataset sits almost exactly at a B→A compartment switch — its immediate 100 kb bin (E1 ≈ −0.12, nominally "B") is really the tail end of the B domain right before it flips to A one bin downstream. So rather than a boundary sitting cleanly inside one compartment, this is a case where insulation and compartmentalization line up: the strongest structural (TAD) boundary coincides with the strongest compartment transition nearby.
 
----|---|---|
-> | 66,000,000 | −0.313 | B |
-> | 66,100,000 | −0.243 | B |
-> | **66,200,000** | **−0.002** | **~boundary** |
-> | 66,300,000 | +0.502 | A |
-> | 66,400,000 | +0.540 | A |
->
-> **Interpretation:** the strongest TAD boundary in this dataset sits almost exactly at a B→A compartment switch — its immediate 100 kb bin (E1 ≈ −0.12, nominally "B") is really the tail end of the B domain right before it flips to A one bin downstream. So rather than a boundary sitting cleanly inside one compartment, this is a case where insulation and compartmentalization line up: the strongest structural (TAD) boundary coincides with the strongest compartment transition nearby.
-
 ---
 
 ## Why this log has been re-captured twice

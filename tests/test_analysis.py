@@ -597,3 +597,90 @@ def test_all_null_balanced_matrix_explains_itself():
     assert out["balanced_matrix"] is not None
     assert all(v is None for row in out["balanced_matrix"] for v in row)
     assert "ICE-filtered" in out["note"]
+
+
+# --- round-7: malformed inputs are the caller's to fix, and credit goes where due ---
+
+
+@pytest.mark.parametrize(
+    "label,body,expected",
+    [
+        (
+            "duplicate names",
+            "cA\t0\t300000\tdup\ncA\t300000\t600000\tdup\n",
+            "reuses the region name",
+        ),
+        ("overlapping", "cA\t0\t400000\ta\ncA\t300000\t600000\tb\n", "overlap"),
+        ("past the end", "cA\t0\t9000000\tlong\n", "runs past the end"),
+        ("zero width", "cA\t300000\t300000\tz\n", "zero or negative width"),
+    ],
+)
+def test_malformed_views_are_named_not_reported_as_internal_bugs(
+    tmp_path, two_chromosome_cool, label, body, expected
+):
+    """cooltools rejects these with one opaque sentence; each is a fixable input."""
+    view = tmp_path / "v.bed"
+    view.write_text(body)
+    with pytest.raises(AnalysisError, match=expected):
+        insulation_tads(file=two_chromosome_cool, view=str(view), top_n=1)
+
+
+def test_an_unsorted_view_is_normalised_not_refused(tmp_path, two_chromosome_cool):
+    """Row order carries no meaning, so sorting is a normalisation, not a refusal."""
+    view = tmp_path / "unsorted.bed"
+    view.write_text("cA\t300000\t600000\tb\ncA\t0\t300000\ta\n")
+    out = insulation_tads(file=two_chromosome_cool, view=str(view), top_n=1)
+    assert "supplied view (2 regions)" in out["view"]
+
+
+def test_phasing_track_binsize_mismatch_is_named():
+    """The repo's own 100 kb track at 10 kb once raised a raw library error."""
+    from hic_mcp.data import data_dir
+
+    with pytest.raises(AnalysisError, match="binned at 100,000 bp"):
+        compartments(
+            resolution=10_000,
+            phasing_track=str(data_dir() / "gc_100kb.tsv"),
+            region=A_BLOCK,
+        )
+
+
+def test_sign_convention_credits_the_track_actually_used(tmp_path):
+    """A user's track must not be described as the bundled one - it changes the answer."""
+    import pandas as pd
+
+    from hic_mcp.data import data_dir
+
+    gc = pd.read_csv(data_dir() / "gc_100kb.tsv", sep="\t")
+    gc["GC"] = -gc["GC"]  # a legitimate, sign-inverted orientation track
+    inverted = tmp_path / "inverted.tsv"
+    gc.to_csv(inverted, sep="\t", index=False)
+
+    bundled = compartments(region=A_BLOCK)
+    supplied = compartments(region=A_BLOCK, phasing_track=str(inverted))
+    assert "bundled GC track" in bundled["sign_convention"]
+    assert "track you supplied" in supplied["sign_convention"]
+    # and the supplied track really is in force: the call flips with the sign
+    assert bundled["region_call"] == "A"
+    assert supplied["region_call"] == "B"
+
+
+def test_curve_note_distinguishes_measured_from_fitted():
+    """Saying N 'were fitted' when the slope used far fewer overstates the fit."""
+    out = expected_observed(region=A_BLOCK, resolution=10_000)
+    note = out["curve_note"]
+    assert "measured separations" in note and "fitted range" in note
+
+
+def test_a_narrow_region_is_not_called_unmappable():
+    """A 1-bin region is all masked diagonals, not bad data - and the note must say so."""
+    out = expected_observed(region="chr17:50,100,000-50,200,000", resolution=100_000)
+    assert out["oe_matrix"] is not None
+    assert all(v is None for row in out["oe_matrix"] for v in row)
+    assert "The data here is fine" in out["note"]
+    assert "ICE-filtered" not in out["note"]
+
+
+def test_band_coverage_reflects_the_window():
+    out = virtual_4c(viewpoint="chr17:63,000,000-63,100,000", window_bp=1_000_000)
+    assert out["distance_bands_cover_bp"] == [0, 1_000_000]

@@ -37,14 +37,16 @@ Now ask your agent: *"Find the strongest TAD boundary in the demo Hi-C data, the
 
 ## What that actually returns
 
-Real output from the bundled data, complete apart from the remaining boundaries — `insulation_tads(region="chr17:65,000,000-67,000,000", top_n=2)`:
+Real output from the bundled data — the entire response to `insulation_tads(region="chr17:65,000,000-67,000,000", top_n=2)`, nothing removed:
 
 ```json
 {
+  "region": "chr17:65,000,000-67,000,000",
   "resolution_used": 10000,
   "view": "chr17 p/q arms (bundled)",
   "windows_bp": [100000, 250000, 500000],
   "ranked_by": "boundary_strength at the 250000 bp window",
+  "boundary_counts_per_window": {"100000": 5, "250000": 4, "500000": 3},
   "balanced": true,
   "method": "cooltools.insulation (diamond insulation score; Li threshold boundary calls)",
   "top_boundaries": [

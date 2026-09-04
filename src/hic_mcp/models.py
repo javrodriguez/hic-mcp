@@ -83,6 +83,7 @@ class Compartments(BaseModel):
     resolution_used: int
     view: str
     sign_convention: str
+    phasing_coverage_note: str | None = None
     eigenvalues: list[ArmEigenvalue]
     eigenvalue_note: str | None = None
     balanced: bool

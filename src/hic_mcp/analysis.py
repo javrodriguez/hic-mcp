@@ -52,16 +52,56 @@ def _resolve_view(path, view: str | None, clr: Cooler | None = None):
     if view is not None:
         view_df = load_view_file(view)
         if clr is not None:
-            unknown = sorted(set(view_df["chrom"]) - set(map(str, clr.chromnames)))
-            if unknown:
-                raise AnalysisError(
-                    f"The view names {', '.join(unknown)}, which this file does not "
-                    f"contain (it has: {', '.join(map(str, clr.chromnames[:10]))}). "
-                    "Chromosome names must match the file exactly - '17' and 'chr17' "
-                    "are different names."
-                )
-        return view_df
+            _validate_view(view_df, clr)
+        # cooltools needs a sorted viewframe; region order carries no meaning here
+        # (each region is analysed independently), so sorting is a normalisation, not
+        # a change of answer - and refusing over row order would be pedantry.
+        return view_df.sort_values(["chrom", "start"]).reset_index(drop=True)
     return load_arms_view() if is_demo(path) else None
+
+
+def _validate_view(view_df, clr: Cooler) -> None:
+    """Reject a malformed view with a message the caller can act on.
+
+    cooltools requires a proper viewframe - unique names, no overlaps, in bounds - and
+    rejects anything else with one opaque sentence. Every failure here is a fixable
+    input, so each is named specifically rather than surfacing as an internal bug.
+    """
+    sizes = {str(c): int(s) for c, s in clr.chromsizes.items()}
+    unknown = sorted(set(view_df["chrom"]) - set(sizes))
+    if unknown:
+        raise AnalysisError(
+            f"The view names {', '.join(unknown)}, which this file does not contain "
+            f"(it has: {', '.join(list(sizes)[:10])}). Chromosome names must match the "
+            "file exactly - '17' and 'chr17' are different names."
+        )
+    dupes = sorted(view_df["name"][view_df["name"].duplicated()].unique())
+    if dupes:
+        raise AnalysisError(
+            f"The view reuses the region name(s) {', '.join(map(str, dupes))}. Every "
+            "region needs its own name, since results are reported per region."
+        )
+    for _, r in view_df.iterrows():
+        if int(r["start"]) < 0 or int(r["end"]) > sizes[str(r["chrom"])]:
+            raise AnalysisError(
+                f"View region {r['name']} ({r['chrom']}:{int(r['start']):,}-"
+                f"{int(r['end']):,}) runs past the end of {r['chrom']}, which is "
+                f"{sizes[str(r['chrom'])]:,} bp in this file."
+            )
+        if int(r["end"]) <= int(r["start"]):
+            raise AnalysisError(
+                f"View region {r['name']} has zero or negative width "
+                f"({int(r['start']):,}-{int(r['end']):,})."
+            )
+    ordered = view_df.sort_values(["chrom", "start"])
+    for chrom, grp in ordered.groupby("chrom"):
+        ends = grp["end"].to_numpy()
+        starts = grp["start"].to_numpy()
+        if len(grp) > 1 and (starts[1:] < ends[:-1]).any():
+            raise AnalysisError(
+                f"View regions on {chrom} overlap. Each position must belong to at most "
+                "one region, or a result would be attributed to two of them."
+            )
 
 
 def _check_region_in_view(view_df, chrom: str, start: int, end: int, clr=None) -> None:
@@ -358,7 +398,16 @@ def compartments(
         phasing = load_gc_track()
     else:
         phasing = None
+    coverage_warning = None
     if phasing is not None:
+        spans = (phasing["end"] - phasing["start"]).unique()
+        if len(spans) and int(spans[0]) != int(clr.binsize):
+            raise AnalysisError(
+                f"The phasing track is binned at {int(spans[0]):,} bp but this analysis "
+                f"runs at {int(clr.binsize):,} bp; cooltools needs them to match. Pass "
+                f"resolution={int(spans[0])} to use the track's own binning, or supply a "
+                f"track binned at {int(clr.binsize):,} bp."
+            )
         # cooltools requires the track to cover EVERY region it decomposes. With no view
         # that means every chromosome in the FILE - which is the default for a user's own
         # file, so gating this check on a view left the common case unguarded.
@@ -369,6 +418,17 @@ def compartments(
         else:
             needed = {str(c) for c in clr.chromnames}
             scope = "with no view supplied, every chromosome in the file is decomposed"
+        # a track that covers the regions but only sparsely still yields a weak
+        # orientation; say so rather than letting a thin track pass silently
+        bins_needed = int(clr.info["nbins"])
+        if bins_needed and len(phasing) / bins_needed < 0.5:
+            coverage_warning = (
+                f"The phasing track has {len(phasing):,} rows against {bins_needed:,} bins "
+                "in this file (under half). The orientation it gives is correspondingly "
+                "weak - treat A/B calls as provisional."
+            )
+        else:
+            coverage_warning = None
         missing = sorted(needed - covered)
         if missing:
             raise AnalysisError(
@@ -378,8 +438,13 @@ def compartments(
             )
     view = view_df
     eigvals, eigvecs = eigs_cis(clr, phasing_track=phasing, view_df=view, n_eigs=3)
+    phasing_source = (
+        "the track you supplied"
+        if phasing_track is not None
+        else "the bundled GC track"
+    )
     sign_convention = (
-        "oriented by the bundled GC track (positive E1 = A = gene-dense/GC-rich)"
+        f"oriented by {phasing_source} (positive E1 = A, i.e. higher track value = A)"
         if phasing is not None
         else "UNPHASED - the sign of E1 is mathematically arbitrary. Pass phasing_track "
         "(a tab-separated chrom/start/end/value file, e.g. GC fraction) to orient it "
@@ -389,6 +454,7 @@ def compartments(
         "resolution_used": int(clr.binsize),
         "view": _view_label(view_df, view_arg_used, path),
         "sign_convention": sign_convention,
+        "phasing_coverage_note": coverage_warning if phasing is not None else None,
         "eigenvalues": [
             {
                 "region": str(r["name"] if "name" in r else r["chrom"]),
@@ -595,7 +661,9 @@ def virtual_4c(
         ),
         "distance_band_means": band_means,
         "distance_band_bins": band_bins,
-        "distance_bands_cover_bp": [0, bands[-1][1]],
+        "distance_bands_cover_bp": (
+            [0, min(window_bp, bands[-1][1])] if window_bp is not None else [0, bands[-1][1]]
+        ),
         "coverage_note": (
             (
                 f"Both the profile and the band means are limited to {window_bp:,} bp "
@@ -685,10 +753,11 @@ def expected_observed(
             for r in curve.iloc[:: max(1, len(curve) // 100)].itertuples()
         ],
         "curve_note": (
-            f"{len(curve)} separations were fitted; the points above are every "
-            f"{max(1, len(curve) // 100)}th for transport"
+            f"The curve covers {len(curve)} measured separations, of which {len(sl)} fall "
+            f"in the fitted range; the points listed above are every "
+            f"{max(1, len(curve) // 100)}th of the curve, for transport."
             if len(curve) > 100
-            else f"all {len(curve)} fitted separations are listed"
+            else f"All {len(curve)} measured separations are listed; {len(sl)} were fitted."
         ),
         "balanced": True,
         "method": (
@@ -710,11 +779,23 @@ def expected_observed(
                     oe[k + d, k] = v
         out["oe_matrix"] = [[_finite(v) for v in rowv] for rowv in oe]
         if not np.isfinite(oe).any():
-            out["note"] = (
-                f"Every cell is null: {chrom}:{start:,}-{end:,} has no balanced signal at "
-                f"{binsize:,} bp (its bins are ICE-filtered, e.g. centromeric or "
-                "low-mappability). Ask for a region with mappable bins."
-            )
+            if obs.shape[0] <= IGNORE_DIAGS:
+                # not a data problem: every separation inside the region is one of the
+                # diagonals cooltools does not measure, so no ratio can exist here
+                out["note"] = (
+                    f"Every cell is null because {chrom}:{start:,}-{end:,} is only "
+                    f"{obs.shape[0]} bin(s) wide at {binsize:,} bp, and the first "
+                    f"{IGNORE_DIAGS} diagonals carry no expected measurement. The data "
+                    f"here is fine - ask for a region of at least {IGNORE_DIAGS + 2} bins "
+                    f"({(IGNORE_DIAGS + 2) * binsize:,} bp) to see an observed/expected "
+                    "ratio, or use a finer resolution."
+                )
+            else:
+                out["note"] = (
+                    f"Every cell is null: {chrom}:{start:,}-{end:,} has no balanced signal "
+                    f"at {binsize:,} bp (its bins are ICE-filtered, e.g. centromeric or "
+                    "low-mappability). Ask for a region with mappable bins."
+                )
         else:
             out["note"] = (
                 f"The first {IGNORE_DIAGS} diagonals read null by construction: cooltools "

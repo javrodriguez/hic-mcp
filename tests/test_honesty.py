@@ -154,14 +154,21 @@ def test_readme_sample_output_is_what_the_code_actually_returns():
     from hic_mcp.analysis import insulation_tads
 
     readme = (REPO / "README.md").read_text()
-    block = re.search(r"```json\n(\{\n  \"resolution_used\".*?)```", readme, re.DOTALL)
+    block = re.search(r"```json\n(\{\n  \"region\".*?)```", readme, re.DOTALL)
     assert block, "README no longer contains the sample-output block"
     claimed = json.loads(block.group(1))
     live = insulation_tads(region="chr17:65,000,000-67,000,000", top_n=2)
-    assert claimed["resolution_used"] == live["resolution_used"]
-    assert claimed["windows_bp"] == live["windows_bp"]
-    assert claimed["ranked_by"] == live["ranked_by"]
-    assert claimed.get("view") == live["view"]
+    # the whole response, top level included: the block once dropped `region` and
+    # `boundary_counts_per_window` while every per-boundary field matched, because
+    # this check only ever looked inside the boundaries
+    live_shown = {k: v for k, v in live.items() if v is not None}
+    assert set(claimed) == set(live_shown), (
+        f"README block and live response differ at the top level: "
+        f"missing {sorted(set(live_shown) - set(claimed))}, "
+        f"extra {sorted(set(claimed) - set(live_shown))}"
+    )
+    for key in set(claimed) - {"top_boundaries"}:
+        assert claimed[key] == live_shown[key], key
     for shown, actual in zip(claimed["top_boundaries"], live["top_boundaries"], strict=True):
         # EVERY field, not a chosen subset: log2_insulation once drifted while
         # strength stayed put, because the guard checked strength and not log2
@@ -236,7 +243,21 @@ def test_transcript_quotes_the_conclusion_completely_and_unaltered():
     marker = "**The agent's conclusion, in full"
     assert marker in transcript, "the conclusion block is no longer quoted in full"
     after = transcript[transcript.index(marker) :]
-    block = after[after.index("\n\n") + 2 : after.index("\n\n---")]
+    body = after[after.index("\n\n") + 2 :]
+    # bound on a real section separator - a line that is exactly '---'. Slicing on the
+    # first '---' once stopped inside a markdown table rule ('---|---|---|'), leaving
+    # eight duplicated lines below it unchecked while this test passed.
+    cut = None
+    offset = 0
+    for raw_line in body.splitlines(keepends=True):
+        if raw_line.strip() == "---":
+            cut = offset
+            break
+        offset += len(raw_line)
+    assert cut is not None, "no section separator after the conclusion block"
+    block = body[:cut]
+    stray = [ln for ln in block.splitlines() if ln.strip() and not ln.startswith(">")]
+    assert not stray, f"unquoted lines inside the conclusion block: {stray[:3]}"
 
     unquoted = "\n".join(
         ln[2:] if ln.startswith("> ") else ("" if ln.strip() == ">" else ln)
