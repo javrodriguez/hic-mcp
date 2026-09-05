@@ -37,6 +37,7 @@ COARSE_WINDOW_BINS = (3, 5, 10)  # fallback multipliers when bins are too big fo
 MIN_BINS_FOR_CONSISTENCY = 3  # below this a sign-consistency figure is vacuous
 VIEWPOINT_MAX_BINS = 10  # a virtual-4C viewpoint is an anchor, not a region
 COMPARTMENT_MEMORY_CAP_GB = 4.0  # eigs_cis densifies per region; refuse before the OOM
+DENSE_FETCH_CAP_GB = 0.5  # above this, contacts_at_locus answers from sparse pixels instead
 
 
 def _finite(x: float) -> float | None:
@@ -264,27 +265,43 @@ def contacts_at_locus(
         )
     else:
         out_trans_note = None
-    raw = clr.matrix(balance=False).fetch(r1, r2)
-    # One counting convention, the file's own: each contact counted once. A single
-    # region comes back as a symmetric square, so summing it whole would count every
-    # off-diagonal contact twice and disagree with matrix_summary on the same data.
+    # Project the dense cost BEFORE fetching anything: every sibling that densifies guards
+    # first, and this one fetched a whole chromosome at 10 kb (1.5 GB) to return a few
+    # scalars. Above the cap the same statistics come from the sparse pixel table instead,
+    # so the tool answers rather than refuses.
+    n1 = -(-(end - start) // resolution)
+    n2 = -(-(e2 - s2) // resolution)
+    dense_gb = 8 * n1 * n2 / 1e9
+    sparse_mode = dense_gb > DENSE_FETCH_CAP_GB or max(n1, n2) > MATRIX_BIN_CAP * 4
     if region2 is None:
-        raw_once = np.triu(np.nan_to_num(raw))
         counting = "each contact counted once (upper triangle incl. diagonal)"
     else:
-        raw_once = np.nan_to_num(raw)
         counting = "each pixel of the region x region2 block counted once"
         if c2 == chrom and s2 < end and start < e2:
             counting += " - the regions overlap, so contacts inside the overlap appear twice"
+    if sparse_mode:
+        pix = clr.matrix(balance=False, as_pixels=True).fetch(r1, r2)
+        if region2 is None:
+            pix = pix[pix["bin1_id"] <= pix["bin2_id"]]  # upper triangle, once each
+        raw_sum = int(pix["count"].sum()) if len(pix) else 0
+        raw_max = int(pix["count"].max()) if len(pix) else 0
+        nonzero_fraction = round(len(pix) / max(1, n1 * n2), 4)
+        raw = None
+    else:
+        raw = clr.matrix(balance=False).fetch(r1, r2)
+        raw_once = np.triu(np.nan_to_num(raw)) if region2 is None else np.nan_to_num(raw)
+        raw_sum = int(raw_once.sum())
+        raw_max = int(np.nanmax(raw)) if raw.size else 0
+        nonzero_fraction = round(float((raw > 0).mean()), 4) if raw.size else 0.0
     out: dict = {
         "region": r1,
         "region2": r2 if region2 is not None else None,
         "resolution_used": resolution,
-        "shape_bins": list(raw.shape),
-        "raw_contacts_sum": int(raw_once.sum()),
+        "shape_bins": [n1, n2],
+        "raw_contacts_sum": raw_sum,
         "counting": counting,
-        "raw_contacts_max": int(np.nanmax(raw)) if raw.size else 0,
-        "nonzero_fraction": round(float((raw > 0).mean()), 4) if raw.size else 0.0,
+        "raw_contacts_max": raw_max,
+        "nonzero_fraction": nonzero_fraction,
         "balanced": use_weights,
         "method": "cooler.Cooler.matrix().fetch (raw counts; ICE-balanced values when available)",
     }
@@ -295,7 +312,19 @@ def contacts_at_locus(
     out.setdefault("balanced_mean", None)
     out.setdefault("balanced_max", None)
     out.setdefault("balanced_matrix", None)
-    if use_weights and raw.size:
+    if use_weights and sparse_mode:
+        bpix = clr.matrix(balance=True, as_pixels=True).fetch(r1, r2)
+        vals = bpix["balanced"].to_numpy()
+        vals = vals[np.isfinite(vals)]
+        out["balanced_mean"] = _finite(vals.mean()) if vals.size else None
+        out["balanced_max"] = _finite(vals.max()) if vals.size else None
+        out["balanced_matrix"] = None
+        out["note"] = (
+            f"{n1}x{n2} bins is too large to hold as a dense matrix ({dense_gb:.1f} GB), "
+            "so the statistics were computed from the sparse pixel table and the matrix "
+            "itself is not returned. Narrow the region or use a coarser resolution."
+        )
+    elif use_weights and raw is not None and raw.size:
         bal = clr.matrix(balance=True).fetch(r1, r2)
         finite_bal = bal[np.isfinite(bal)]
         out["balanced_mean"] = _finite(finite_bal.mean()) if finite_bal.size else None
@@ -329,6 +358,8 @@ def insulation_tads(
     top_n: int = 10,
 ) -> dict:
     """Diamond insulation score and TAD-boundary calls (Crane et al. 2015 method)."""
+    if top_n < 1:
+        raise AnalysisError(f"top_n must be at least 1 (got {top_n}).")
     path = resolve_input_path(file)
     clr = open_matrix(path, resolution, default=10000)
     if not _weights_present(clr):
@@ -342,8 +373,18 @@ def insulation_tads(
     # so a 100 kb file still gets TAD-scale calls rather than compartment-scale ones.
     if windows_bp:
         windows = windows_bp
+        off = [w for w in windows if w % binsize]
+        if off:
+            raise AnalysisError(
+                f"Window(s) {', '.join(f'{w:,}' for w in off)} bp are not multiples of the "
+                f"{binsize:,} bp bin size; cooltools needs whole bins. Nearest multiples: "
+                f"{', '.join(f'{max(3, round(w / binsize)) * binsize:,}' for w in off)} bp."
+            )
     elif 3 * binsize <= min(CLASSIC_TAD_WINDOWS):
-        windows = list(CLASSIC_TAD_WINDOWS)
+        # the classic windows, snapped to whole bins: 100/250/500 kb are exact at 10 kb
+        # but not at 4, 8, 15, 20 or 30 kb - all ordinary Hi-C resolutions - and cooltools
+        # rejects a window that is not a multiple of the bin size
+        windows = sorted({max(3, round(w / binsize)) * binsize for w in CLASSIC_TAD_WINDOWS})
     else:
         windows = [n * binsize for n in COARSE_WINDOW_BINS]
     for w in windows:
@@ -542,8 +583,7 @@ def compartments(
                 f"{scope} - every one must be covered. Extend the track, or pass a view "
                 "limited to the regions it covers."
             )
-    view = view_df
-    eigvals, eigvecs = eigs_cis(clr, phasing_track=phasing, view_df=view, n_eigs=3)
+    eigvals, eigvecs = eigs_cis(clr, phasing_track=phasing, view_df=view_df, n_eigs=3)
     phasing_source = (
         "the track you supplied"
         if phasing_track is not None
@@ -741,7 +781,11 @@ def virtual_4c(
             label = _band_label(lo, hi)
             band_means[label] = _finite(sel.mean())
             band_bins[label] = int(sel.size)
-    finite = np.isfinite(vals)
+    # the profile points and the band means must share one convention: a mappable bin
+    # with no contacts is a zero in both, never counted in one and dropped from the other
+    # ...and the window applies here too: zero-filling happens before this point, so
+    # without `in_window` a windowed-out mappable bin would come back as a 0.0 point
+    finite = np.isfinite(usable) & mappable & ~own & in_window
     n = int(finite.sum())
     if n == 0:
         raise AnalysisError(
@@ -755,15 +799,15 @@ def virtual_4c(
         "resolution_used": int(clr.binsize),
         "window_bp": window_bp,
         "profile_points": [
-            {"start": int(pos[i]), "balanced": _finite(vals[i])} for i in idx
+            {"start": int(pos[i]), "balanced": _finite(usable[i])} for i in idx
         ],
         "profile_note": (
-            f"{n} bins carry a measured contact value"
+            f"{n} mappable bins are reported"
             + (f"; downsampled to every {stride}th point for transport" if stride > 1 else "")
-            + ". cooltools masks the viewpoint's own bin, so "
-            "it reads null. Bins that are mappable but share no contacts with the "
-            "viewpoint are genuine zeros and are counted as zero in the band means; "
-            "ICE-filtered bins carry no measurement and are excluded from them."
+            + ". One convention throughout: a mappable bin with no contacts is a genuine "
+            "zero, in the points and in the band means alike; ICE-filtered bins and the "
+            "viewpoint's own bin (masked by cooltools) carry no measurement and appear in "
+            "neither."
         ),
         "distance_band_means": band_means,
         "distance_band_bins": band_bins,
@@ -806,16 +850,18 @@ def expected_observed(
     # the arm view is resolution-independent, so it applies at every resolution - the
     # region model must not change silently with bin size
     view_arg = view
-    view = _resolve_view(path, view_arg, clr)
+    view_df = _resolve_view(path, view_arg, clr)
 
     scope_name = chrom
-    if view is not None:
+    if view_df is not None:
         # raises with the view's own regions named - never invents a centromere
-        _check_region_in_view(view, chrom, start, end, clr)
-        row = view[(view["chrom"] == chrom) & (view["start"] <= start) & (view["end"] >= end)]
+        _check_region_in_view(view_df, chrom, start, end, clr)
+        row = view_df[
+            (view_df["chrom"] == chrom) & (view_df["start"] <= start) & (view_df["end"] >= end)
+        ]
         scope_name = str(row.iloc[0]["name"])
 
-    exp = expected_cis(clr, view_df=view, ignore_diags=IGNORE_DIAGS, nproc=1)
+    exp = expected_cis(clr, view_df=view_df, ignore_diags=IGNORE_DIAGS, nproc=1)
     exp = exp[exp["region1"] == exp["region2"]]
     # cooltools masks the first `ignore_diags` diagonals: `balanced.avg` is NaN there, and
     # the SMOOTHED column carries a smoother extrapolation rather than a measurement.
@@ -844,7 +890,7 @@ def expected_observed(
         "resolution_used": binsize,
         "view": (
             f"{scope_name} ({'supplied view' if view_arg else 'bundled arm view'})"
-            if view is not None
+            if view_df is not None
             else f"{scope_name} (whole chromosome)"
         ),
         "curve_scope": (

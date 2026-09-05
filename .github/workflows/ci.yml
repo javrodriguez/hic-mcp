@@ -17,5 +17,7 @@ jobs:
         run: uv sync --dev
       - name: Lint
         run: uv run ruff check .
+      - name: Type-check
+        run: uv run mypy src/hic_mcp
       - name: Tests
         run: uv run pytest -q

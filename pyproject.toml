@@ -3,7 +3,7 @@ name = "hic-mcp"
 version = "0.1.0"
 description = "MCP server for Hi-C / 3D-chromatin analysis: the open2c stack (cooler, cooltools) as agent tools over local .mcool/.cool files."
 readme = "README.md"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.12,<3.14"  # 3.12 and 3.13 proven by the full suite; 3.14 unproven for the scientific stack
 license = { text = "MIT" }
 authors = [{ name = "Javier Rodriguez Hernaez" }]
 keywords = ["hi-c", "mcp", "3d-genome", "chromatin", "cooler", "cooltools", "model-context-protocol"]
@@ -28,6 +28,7 @@ dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
     "ruff>=0.6",
+    "mypy>=1.10",
 ]
 
 [build-system]
@@ -44,3 +45,7 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true  # cooler / cooltools / bioframe ship no type information

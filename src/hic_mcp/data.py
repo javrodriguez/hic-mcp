@@ -105,7 +105,13 @@ def open_matrix(path: Path, resolution: int | None, default: int) -> cooler.Cool
     by_res = _resolution_uris(path)
     available = sorted(by_res)
     if resolution is None:
-        resolution = default if default in available else available[0]
+        if default in available:
+            resolution = default
+        else:
+            # nearest at-or-coarser-than the default, else the coarsest there is: an
+            # analysis that asks for 100 kb wants 100 kb-ish, not the finest level
+            at_or_above = [r for r in available if r >= default]
+            resolution = at_or_above[0] if at_or_above else available[-1]
     if resolution not in available:
         raise DataError(
             f"Resolution {resolution} bp is not in {path.name}. "
@@ -179,6 +185,8 @@ def load_view_file(path: str) -> pd.DataFrame:
     p = Path(path).expanduser()
     if not p.exists():
         raise DataError(f"No such view file: {p}. Expected a tab-separated BED-like file.")
+    if not p.is_file():
+        raise DataError(f"{p} is a directory, not a view file. Pass the BED-like file itself.")
     kwargs = _header_kwargs(p)
     try:
         df = pd.read_csv(p, **kwargs)
@@ -220,6 +228,8 @@ def load_track_file(path: str) -> pd.DataFrame:
     p = Path(path).expanduser()
     if not p.exists():
         raise DataError(f"No such phasing track: {p}. Expected a tab-separated bedGraph.")
+    if not p.is_file():
+        raise DataError(f"{p} is a directory, not a phasing track. Pass the file itself.")
     kwargs = _header_kwargs(p)
     try:
         df = pd.read_csv(p, **kwargs)
@@ -242,6 +252,12 @@ def load_track_file(path: str) -> pd.DataFrame:
         raise DataError(
             f"Phasing track {p.name} has non-numeric start/end values. Expected "
             "tab-separated chrom, start, end and a numeric value column."
+        )
+    if df[value_name].isna().all():
+        raise DataError(
+            f"Phasing track {p.name}: its fourth column ({value_name!r}) holds no numbers. "
+            "A phasing track needs a numeric value per bin (GC fraction, gene density...) - "
+            "a BED file whose fourth column is a name or '.' is a region list, not a track."
         )
     df["start"] = df["start"].astype(int)
     df["end"] = df["end"].astype(int)

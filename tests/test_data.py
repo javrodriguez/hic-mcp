@@ -109,3 +109,29 @@ def test_open_matrix_uses_the_uri_it_found(tmp_path):
     assert list_resolutions(path) == [10_000, 20_000]
     assert open_matrix(path, 20_000, default=10_000).binsize == 20_000
     assert open_matrix(path, None, default=10_000).binsize == 10_000
+
+
+def test_missing_default_resolution_falls_to_the_nearest_coarser(tmp_path):
+    """An analysis asking for 100 kb wants 100 kb-ish - never the finest level by accident."""
+    import numpy as np
+    import pandas as pd
+
+    path = tmp_path / "two_res.mcool"
+    for k_, (label, bs) in enumerate((("a", 10_000), ("b", 50_000))):
+        n = 50
+        bins = pd.DataFrame(
+            {"chrom": "cX", "start": np.arange(n) * bs, "end": (np.arange(n) + 1) * bs}
+        )
+        i, j = np.triu_indices(n)
+        c = np.random.default_rng(1).poisson(80.0 / (1 + (j - i))).astype(int)
+        k = c > 0
+        cooler.create_cooler(
+            f"{path}::/maps/{label}",
+            bins,
+            pd.DataFrame({"bin1_id": i[k], "bin2_id": j[k], "count": c[k]}),
+            mode="w" if k_ == 0 else "a",
+        )
+    # compartments' default is 100 kb: absent, so the coarsest (50 kb) - not 10 kb
+    assert open_matrix(path, None, default=100_000).binsize == 50_000
+    # insulation's default is 10 kb: present, so exactly that
+    assert open_matrix(path, None, default=10_000).binsize == 10_000

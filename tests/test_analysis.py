@@ -204,7 +204,7 @@ def test_virtual4c_ground_truth_shape():
     assert all(v is not None for v in vals)
     assert vals == sorted(vals, reverse=True)  # decaying distance-band means
     assert all(p["balanced"] is not None for p in out["profile_points"])
-    assert "genuine zeros" in out["profile_note"]
+    assert "genuine zero" in out["profile_note"]  # one convention, stated once
     # every band must average over real bins, and mappable zero-contact bins count
     assert out["distance_band_bins"]["5Mb-10Mb"] == 1000
     assert out["distance_band_means"]["5Mb-10Mb"] == pytest.approx(0.000146, rel=0.05)
@@ -798,3 +798,93 @@ def test_insulation_accepts_a_whole_chromosome_region():
     whole = insulation_tads(region="chr17", top_n=1)
     unfiltered = insulation_tads(top_n=1)
     assert whole["top_boundaries"][0]["locus"] == unfiltered["top_boundaries"][0]["locus"]
+
+
+# --- loop v2, round 1: the resolutions the demo never exercised ---------------
+
+
+def _balanced_cool(tmp_path, binsize, n=80):
+    import cooler
+
+    p = str(tmp_path / f"f_{binsize}.cool")
+    bins = pd.DataFrame(
+        {"chrom": "cA", "start": np.arange(n) * binsize, "end": (np.arange(n) + 1) * binsize}
+    )
+    i, j = np.triu_indices(n)
+    c = np.random.default_rng(1).poisson(150.0 / (1 + (j - i)) ** 0.8).astype(int)
+    k = c > 0
+    cooler.create_cooler(p, bins, pd.DataFrame({"bin1_id": i[k], "bin2_id": j[k], "count": c[k]}))
+    cooler.balance_cooler(cooler.Cooler(p), store=True, cis_only=True)
+    return p
+
+
+@pytest.mark.parametrize("binsize", [4_000, 8_000, 15_000, 20_000, 30_000])
+def test_auto_windows_work_at_every_ordinary_resolution(tmp_path, binsize):
+    """Zero user arguments must never crash: windows are snapped to whole bins."""
+    out = insulation_tads(file=_balanced_cool(tmp_path, binsize), top_n=1)
+    assert all(w % binsize == 0 for w in out["windows_bp"])
+    assert min(out["windows_bp"]) >= 3 * binsize
+
+
+def test_user_windows_off_the_bin_grid_are_named(tmp_path):
+    with pytest.raises(AnalysisError, match="not multiples of the 8,000 bp bin size"):
+        insulation_tads(file=_balanced_cool(tmp_path, 8_000), windows_bp=[100_000], top_n=1)
+
+
+def test_phasing_track_with_a_name_column_is_refused_as_a_track(tmp_path):
+    """A BED4 whose fourth column is a name is a region list, not a phasing track."""
+    from hic_mcp.data import DataError
+
+    p = _balanced_cool(tmp_path, 10_000)
+    track = tmp_path / "names.bed"
+    track.write_text("".join(f"cA\t{i * 10000}\t{(i + 1) * 10000}\tregion{i}\n" for i in range(80)))
+    with pytest.raises(DataError, match="holds no numbers"):
+        compartments(file=p, phasing_track=str(track), region="cA:0-300,000")
+
+
+def test_top_n_below_one_is_refused():
+    with pytest.raises(AnalysisError, match="top_n must be at least 1"):
+        insulation_tads(top_n=0)
+
+
+def test_contacts_answers_a_whole_chromosome_without_densifying():
+    """A whole chromosome at 10 kb once densified 1.5 GB to return a few scalars."""
+    out = contacts_at_locus(region="chr17", resolution=10_000)
+    assert out["shape_bins"] == [8326, 8326]
+    assert out["raw_contacts_sum"] == 129_434_772  # same answer, sparse road
+    assert out["balanced_matrix"] is None
+    assert "sparse pixel table" in out["note"]
+
+
+def test_contacts_sparse_and_dense_roads_agree():
+    """The sparse road must give the dense road's numbers, not merely finish."""
+    dense = contacts_at_locus(region="chr17:50,000,000-50,500,000", resolution=10_000)
+    assert "sparse" not in (dense.get("note") or "")
+    import hic_mcp.analysis as an
+
+    saved = an.DENSE_FETCH_CAP_GB
+    try:
+        an.DENSE_FETCH_CAP_GB = 0.0  # force the sparse road for the same region
+        sparse = contacts_at_locus(region="chr17:50,000,000-50,500,000", resolution=10_000)
+    finally:
+        an.DENSE_FETCH_CAP_GB = saved
+    assert sparse["raw_contacts_sum"] == dense["raw_contacts_sum"]
+    assert sparse["raw_contacts_max"] == dense["raw_contacts_max"]
+    assert sparse["balanced_max"] == pytest.approx(dense["balanced_max"], rel=1e-6)
+
+
+def test_virtual4c_points_and_bands_share_one_zero_convention():
+    """A mappable zero-contact bin must be a zero in the points, not silently dropped."""
+    out = virtual_4c(viewpoint="chr17:63,000,000-63,100,000")
+    vals = [p["balanced"] for p in out["profile_points"]]
+    assert any(v == 0.0 for v in vals), "no genuine zeros reported in the profile points"
+    assert "One convention throughout" in out["profile_note"]
+
+
+def test_a_directory_is_not_a_view_or_a_track(tmp_path, two_chromosome_cool):
+    from hic_mcp.data import DataError
+
+    with pytest.raises(DataError, match="is a directory"):
+        insulation_tads(file=two_chromosome_cool, view=str(tmp_path), top_n=1)
+    with pytest.raises(DataError, match="is a directory"):
+        compartments(file=two_chromosome_cool, phasing_track=str(tmp_path), region="cA:0-300,000")
