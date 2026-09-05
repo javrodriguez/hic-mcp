@@ -868,9 +868,47 @@ def test_contacts_sparse_and_dense_roads_agree():
         sparse = contacts_at_locus(region="chr17:50,000,000-50,500,000", resolution=10_000)
     finally:
         an.DENSE_FETCH_CAP_GB = saved
-    assert sparse["raw_contacts_sum"] == dense["raw_contacts_sum"]
-    assert sparse["raw_contacts_max"] == dense["raw_contacts_max"]
-    assert sparse["balanced_max"] == pytest.approx(dense["balanced_max"], rel=1e-6)
+    # EVERY statistic, not a chosen few: this guard once compared sum/max/balanced_max -
+    # the three that happened to agree - while nonzero_fraction was out by 2x (upper
+    # triangle counted against the full square) and balanced_mean used another denominator
+    for key in ("raw_contacts_sum", "raw_contacts_max", "nonzero_fraction",
+                "balanced_mean", "balanced_max", "counting", "shape_bins"):
+        d, sp = dense.get(key), sparse.get(key)
+        if isinstance(d, float) and isinstance(sp, float):
+            assert sp == pytest.approx(d, rel=1e-6), key
+        else:
+            assert sp == d, key
+
+
+@pytest.mark.parametrize(
+    "region,region2",
+    [
+        ("chr17:50,000,000-50,500,000", None),          # symmetric square
+        ("chr17:50,000,000-50,300,000", "chr17:60,000,000-60,300,000"),  # off-diagonal block
+        ("chr17:23,000,000-23,300,000", None),          # fully ICE-filtered
+    ],
+)
+def test_sparse_and_dense_agree_on_every_region_shape(region, region2):
+    """cooler stores one triangle: a square's cells and sums must be mirrored, a block's not."""
+    import hic_mcp.analysis as an
+
+    kwargs = {"region": region, "resolution": 10_000}
+    if region2:
+        kwargs["region2"] = region2
+    dense = contacts_at_locus(**kwargs)
+    saved = an.DENSE_FETCH_CAP_GB
+    try:
+        an.DENSE_FETCH_CAP_GB = 0.0
+        sparse = contacts_at_locus(**kwargs)
+    finally:
+        an.DENSE_FETCH_CAP_GB = saved
+    for key in ("raw_contacts_sum", "raw_contacts_max", "nonzero_fraction",
+                "balanced_mean", "balanced_max"):
+        d, sp = dense.get(key), sparse.get(key)
+        if isinstance(d, float) and isinstance(sp, float):
+            assert sp == pytest.approx(d, rel=1e-6), f"{region} {key}"
+        else:
+            assert sp == d, f"{region} {key}"
 
 
 def test_virtual4c_points_and_bands_share_one_zero_convention():

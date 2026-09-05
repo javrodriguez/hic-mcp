@@ -280,12 +280,21 @@ def contacts_at_locus(
         if c2 == chrom and s2 < end and start < e2:
             counting += " - the regions overlap, so contacts inside the overlap appear twice"
     if sparse_mode:
+        # Same STATISTICS as the dense road, computed from stored pixels. cooler stores
+        # only the upper triangle, so a symmetric square's cell counts and sums must be
+        # mirrored - counting stored pixels against the full square would halve
+        # nonzero_fraction, and averaging over stored pixels alone would inflate the mean.
         pix = clr.matrix(balance=False, as_pixels=True).fetch(r1, r2)
         if region2 is None:
-            pix = pix[pix["bin1_id"] <= pix["bin2_id"]]  # upper triangle, once each
-        raw_sum = int(pix["count"].sum()) if len(pix) else 0
+            upper = pix[pix["bin1_id"] <= pix["bin2_id"]]
+            on_diag = int((upper["bin1_id"] == upper["bin2_id"]).sum())
+            raw_sum = int(upper["count"].sum()) if len(upper) else 0
+            nonzero_cells = 2 * len(upper) - on_diag
+        else:
+            raw_sum = int(pix["count"].sum()) if len(pix) else 0
+            nonzero_cells = len(pix)
         raw_max = int(pix["count"].max()) if len(pix) else 0
-        nonzero_fraction = round(len(pix) / max(1, n1 * n2), 4)
+        nonzero_fraction = round(nonzero_cells / max(1, n1 * n2), 4)
         raw = None
     else:
         raw = clr.matrix(balance=False).fetch(r1, r2)
@@ -314,10 +323,23 @@ def contacts_at_locus(
     out.setdefault("balanced_matrix", None)
     if use_weights and sparse_mode:
         bpix = clr.matrix(balance=True, as_pixels=True).fetch(r1, r2)
-        vals = bpix["balanced"].to_numpy()
-        vals = vals[np.isfinite(vals)]
-        out["balanced_mean"] = _finite(vals.mean()) if vals.size else None
-        out["balanced_max"] = _finite(vals.max()) if vals.size else None
+        bvals = bpix["balanced"].to_numpy()
+        finite = np.isfinite(bvals)
+        if region2 is None:
+            b1 = bpix["bin1_id"].to_numpy()
+            b2 = bpix["bin2_id"].to_numpy()
+            upper_sum = float(bvals[finite & (b1 <= b2)].sum())
+            diag_sum = float(bvals[finite & (b1 == b2)].sum())
+            total = 2 * upper_sum - diag_sum  # mirror the stored triangle
+        else:
+            total = float(bvals[finite].sum())
+        # the dense road averages over every cell that HAS a balanced value, i.e. cells
+        # whose two bins are both mappable - not merely over the stored pixels
+        mappable1 = int(clr.bins().fetch(r1)["weight"].notna().sum())
+        mappable2 = int(clr.bins().fetch(r2)["weight"].notna().sum())
+        cells = mappable1 * mappable2
+        out["balanced_mean"] = _finite(total / cells) if cells else None
+        out["balanced_max"] = _finite(bvals[finite].max()) if finite.any() else None
         out["balanced_matrix"] = None
         out["note"] = (
             f"{n1}x{n2} bins is too large to hold as a dense matrix ({dense_gb:.1f} GB), "
