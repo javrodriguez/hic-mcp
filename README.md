@@ -140,12 +140,37 @@ Full provenance, the rebuild script, and the measured landmarks the test suite a
 
 ## Related work
 
-Surveyed 31 August 2026. Hi-C analysis over MCP is thinly covered, and neighbours differ in scope rather than quality:
+Surveyed 5 September 2026. **The cooltools surface is already reachable over MCP** — this server
+is not the first thing to do that, and the honest distinction is *how*, not *whether*:
 
-- [`zhouhufeng/IGVFagent`](https://github.com/zhouhufeng/IGVFagent) — a 161-tool IGVF/ENCODE agent whose MCP surface includes three Hi-C tools (contact heatmap, Crane insulation, loop QC) built on cooler and hic-straw; it does not expose the cooltools analysis surface (compartments, expected curves, pileups).
-- [`aidenlab/juicebox-mcp`](https://github.com/aidenlab/juicebox-mcp) — Hi-C contact-matrix visualization over MCP.
-- [`ammawla/encode-toolkit`](https://github.com/ammawla/encode-toolkit) — discovery and QC of ENCODE Hi-C experiments; no contact-matrix operations.
-- [`GPTomics/bioSkills`](https://github.com/GPTomics/bioSkills) — a broad Hi-C skill set (including cooltools-based compartment and TAD analysis) as Claude Agent Skills rather than an MCP server.
+- [`coala-info/coala`](https://github.com/coala-info/coala) — a general CWL→MCP adapter. Its
+  [Hi-C example](https://coala.info/use-cases/Hi-C.html) (Feb 2026) stands up an MCP server over
+  `cooler_dump`, `cooltools_insulation`, `cooltools_eigs_cis`, `cooltools_expected_cis` and
+  `cooltools_saddle`, and its companion
+  [`coala-repo`](https://github.com/coala-info/coala-repo) carries CWL definitions for the whole
+  cooltools CLI, `virtual4c` included. **Anything hic-mcp computes, coala can already run.** The
+  difference is that coala wraps the *command line* generically, so a tool's output is whatever
+  the CLI emits; hic-mcp wraps the *Python API* in six typed responses that each name their
+  method, their scope, and the cases where the number should not be trusted.
+- [`zhouhufeng/IGVFagent`](https://github.com/zhouhufeng/IGVFagent) — a large IGVF/ENCODE agent
+  whose MCP surface now includes ~12 Hi-C tools (contact matrix, Crane insulation, loops, and a
+  `spatial_hic_*` set added Sep 2026 covering A/B compartments). Built on cooler and hic-straw
+  with its own reimplementations rather than cooltools; no virtual 4C.
+- [`aidenlab/juicebox-mcp`](https://github.com/aidenlab/juicebox-mcp) — Hi-C contact-matrix
+  visualization over MCP (Dec 2025), and the earliest Hi-C MCP server I found.
+- [`BIsnake2001/ChromSkills`](https://github.com/BIsnake2001/ChromSkills) — the broadest Hi-C
+  analysis surface of any of these (compartment shifts, nested and differential TADs, loop
+  annotation), as Claude Skills in Docker rather than MCP.
+- [`ammawla/encode-toolkit`](https://github.com/ammawla/encode-toolkit) — discovery and QC of
+  ENCODE Hi-C experiments; no contact-matrix operations over MCP.
+- [`GPTomics/bioSkills`](https://github.com/GPTomics/bioSkills) — a broad Hi-C skill set as
+  Claude Agent Skills; archived and read-only since Aug 2026.
+
+**So this repository claims no priority of any kind.** As of 5 September 2026, "the first Hi-C
+MCP server" would be false — juicebox-mcp precedes it by nine months — and "the only one exposing
+cooltools" would be false too, because coala already does. What it offers instead is a purpose-built, typed surface
+over the cooltools Python API, with a real dataset bundled so the whole thing runs offline, and
+a response contract that says what each number means and when it should not be believed.
 
 ## Development
 
