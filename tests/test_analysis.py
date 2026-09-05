@@ -93,7 +93,9 @@ def test_contacts_centromeric_region_is_nearly_empty():
 def test_insulation_strongest_boundary_ground_truth():
     out = insulation_tads()
     assert out["resolution_used"] == 10_000
-    assert out["ranked_by"] == "boundary_strength at the 250000 bp window"
+    # the ranking window is the ground truth here; the rest of the sentence discloses
+    # that top_boundaries is a subset, and is asserted by its own test
+    assert out["ranked_by"].startswith("boundary_strength at the 250000 bp window")
     top = out["top_boundaries"][0]
     assert top["locus"] == BOUNDARY_LOCUS  # measured: strongest at the TAD-scale window
     assert top["strength"] == pytest.approx(2.7629, rel=0.05)
@@ -926,3 +928,40 @@ def test_a_directory_is_not_a_view_or_a_track(tmp_path, two_chromosome_cool):
         insulation_tads(file=two_chromosome_cool, view=str(tmp_path), top_n=1)
     with pytest.raises(DataError, match="is a directory"):
         compartments(file=two_chromosome_cool, phasing_track=str(tmp_path), region="cA:0-300,000")
+
+
+# --- v2 round 2: the axis the parity tests never varied -----------------------
+
+
+@pytest.mark.parametrize("resolution", [10_000, 100_000])
+def test_region_order_does_not_change_the_answer(resolution):
+    """Same two loci, reversed. cooler stores one triangle, so a block entirely below
+    the diagonal fetched as pixels returns NOTHING - which once read as "zero contacts,
+    balanced: true". The parity tests varied region shape but never region order."""
+    upstream = "chr17:50,000,000-53,000,000"
+    downstream = "chr17:60,000,000-63,000,000"
+    asc = contacts_at_locus(region=upstream, region2=downstream, resolution=resolution)
+    desc = contacts_at_locus(region=downstream, region2=upstream, resolution=resolution)
+    assert asc["raw_contacts_sum"] > 0, "fixture should have contacts between these loci"
+    for key in ("raw_contacts_sum", "raw_contacts_max", "nonzero_fraction",
+                "balanced_mean", "balanced_max"):
+        d, u = asc.get(key), desc.get(key)
+        if isinstance(d, float) and isinstance(u, float):
+            assert u == pytest.approx(d, rel=1e-6), key
+        else:
+            assert u == d, key
+
+
+def test_sparse_note_states_the_reason_that_actually_fired():
+    """It once said "too large to hold as a dense matrix (0.0 GB)" - visibly false."""
+    out = contacts_at_locus(region="chr17:50,000,000-53,000,000", resolution=10_000)
+    assert "bins on a side" in out["note"]
+    assert "0.0 GB" not in out["note"]
+
+
+def test_ranked_by_discloses_that_it_filters():
+    """boundary_counts_per_window and top_boundaries describe different populations."""
+    out = insulation_tads(region="chr17:65,000,000-67,000,000", top_n=10)
+    assert "ONLY" in out["ranked_by"] and "subset" in out["ranked_by"]
+    listed = len(out["top_boundaries"])
+    assert listed <= out["boundary_counts_per_window"][str(out["windows_bp"][1])]

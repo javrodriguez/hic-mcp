@@ -269,6 +269,30 @@ def test_transcript_quotes_the_conclusion_completely_and_unaltered():
     )
 
 
+def _assert_same(recorded, live, path: str) -> None:
+    """Deep equality with a float tolerance, so no value can drift unchecked."""
+    assert type(recorded) is type(live) or (
+        isinstance(recorded, (int, float)) and isinstance(live, (int, float))
+    ), f"{path}: type changed ({type(recorded).__name__} -> {type(live).__name__})"
+    if isinstance(recorded, dict):
+        assert set(recorded) == set(live), (
+            f"{path}: keys differ (log-only {sorted(set(recorded) - set(live))}, "
+            f"live-only {sorted(set(live) - set(recorded))})"
+        )
+        for k in recorded:
+            _assert_same(recorded[k], live[k], f"{path}.{k}")
+    elif isinstance(recorded, list):
+        assert len(recorded) == len(live), f"{path}: length {len(recorded)} -> {len(live)}"
+        for i, (r, v) in enumerate(zip(recorded, live, strict=True)):
+            _assert_same(r, v, f"{path}[{i}]")
+    elif isinstance(recorded, bool) or recorded is None:
+        assert recorded == live, f"{path}: {recorded!r} -> {live!r}"
+    elif isinstance(recorded, (int, float)):
+        assert recorded == pytest.approx(live, rel=1e-6), f"{path}: {recorded} -> {live}"
+    else:
+        assert recorded == live, f"{path}: {recorded!r} -> {live!r}"
+
+
 def test_committed_demo_results_replay_against_live_code():
     """Replay every recorded tool result: the log must not drift from the server.
 
@@ -327,6 +351,8 @@ def test_committed_demo_results_replay_against_live_code():
             f"live-only {sorted(set(live) - set(recorded))}). Re-run "
             "scripts/capture_demo.py rather than editing the log."
         )
-        for key, recorded_value in recorded.items():
-            if isinstance(recorded_value, (str, int, bool)) or recorded_value is None:
-                assert recorded_value == live[key], f"{name}.{key} drifted from the log"
+        # EVERY value, to any depth. This once compared only str/int/bool/None, which
+        # skipped region_mean_E1, top_boundaries, boundary_counts_per_window, eigenvalues
+        # and E1_track - i.e. every scientific number in the log. An evaluator mutated
+        # those and the whole honesty module still passed.
+        _assert_same(recorded, live, name)

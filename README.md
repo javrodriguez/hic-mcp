@@ -45,7 +45,7 @@ Real output from the bundled data — the entire response to `insulation_tads(re
   "resolution_used": 10000,
   "view": "chr17 p/q arms (bundled)",
   "windows_bp": [100000, 250000, 500000],
-  "ranked_by": "boundary_strength at the 250000 bp window",
+  "ranked_by": "boundary_strength at the 250000 bp window - top_boundaries lists ONLY boundaries called at that window (capped at top_n), so it is a subset of boundary_counts_per_window, whose other entries count different populations",
   "boundary_counts_per_window": {"100000": 5, "250000": 4, "500000": 3},
   "balanced": true,
   "method": "cooltools.insulation (diamond insulation score; Li threshold boundary calls)",

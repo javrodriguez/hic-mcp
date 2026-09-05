@@ -284,7 +284,14 @@ def contacts_at_locus(
         # only the upper triangle, so a symmetric square's cell counts and sums must be
         # mirrored - counting stored pixels against the full square would halve
         # nonzero_fraction, and averaging over stored pixels alone would inflate the mean.
-        pix = clr.matrix(balance=False, as_pixels=True).fetch(r1, r2)
+        # cooler stores only the upper triangle: an as_pixels fetch of a block lying
+        # entirely BELOW the diagonal returns zero rows, while the dense fetch mirrors
+        # it - so descending region order silently produced "no contacts". Every
+        # statistic here is symmetric under transpose, so fetch in ascending order.
+        fr1, fr2 = (r1, r2)
+        if int(clr.bins().fetch(r1).index[0]) > int(clr.bins().fetch(r2).index[0]):
+            fr1, fr2 = r2, r1
+        pix = clr.matrix(balance=False, as_pixels=True).fetch(fr1, fr2)
         if region2 is None:
             upper = pix[pix["bin1_id"] <= pix["bin2_id"]]
             on_diag = int((upper["bin1_id"] == upper["bin2_id"]).sum())
@@ -322,7 +329,7 @@ def contacts_at_locus(
     out.setdefault("balanced_max", None)
     out.setdefault("balanced_matrix", None)
     if use_weights and sparse_mode:
-        bpix = clr.matrix(balance=True, as_pixels=True).fetch(r1, r2)
+        bpix = clr.matrix(balance=True, as_pixels=True).fetch(fr1, fr2)
         bvals = bpix["balanced"].to_numpy()
         finite = np.isfinite(bvals)
         if region2 is None:
@@ -341,10 +348,15 @@ def contacts_at_locus(
         out["balanced_mean"] = _finite(total / cells) if cells else None
         out["balanced_max"] = _finite(bvals[finite].max()) if finite.any() else None
         out["balanced_matrix"] = None
+        reason = (
+            f"would need {dense_gb:.1f} GB as a dense matrix"
+            if dense_gb > DENSE_FETCH_CAP_GB
+            else f"exceeds {MATRIX_BIN_CAP * 4} bins on a side"
+        )
         out["note"] = (
-            f"{n1}x{n2} bins is too large to hold as a dense matrix ({dense_gb:.1f} GB), "
-            "so the statistics were computed from the sparse pixel table and the matrix "
-            "itself is not returned. Narrow the region or use a coarser resolution."
+            f"{n1}x{n2} bins {reason}, so the statistics were computed from the sparse "
+            "pixel table and the matrix itself is not returned. Narrow the region or use "
+            "a coarser resolution."
         )
     elif use_weights and raw is not None and raw.size:
         bal = clr.matrix(balance=True).fetch(r1, r2)
@@ -477,7 +489,11 @@ def insulation_tads(
         "resolution_used": binsize,
         "view": _view_label(view_df, view, path),
         "windows_bp": windows,
-        "ranked_by": f"boundary_strength at the {rank_w} bp window",
+        "ranked_by": (
+            f"boundary_strength at the {rank_w} bp window - top_boundaries lists ONLY "
+            f"boundaries called at that window (capped at top_n), so it is a subset of "
+            f"boundary_counts_per_window, whose other entries count different populations"
+        ),
         "boundary_counts_per_window": counts,
         "top_boundaries": boundaries,
         "balanced": True,
