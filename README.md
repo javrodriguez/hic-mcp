@@ -150,13 +150,13 @@ Surveyed 31 August 2026. Hi-C analysis over MCP is thinly covered, and neighbour
 ## Development
 
 ```bash
-uv run pytest -q      # ~2 min: every assertion runs the real computation on the bundled data
+uv run pytest -q      # 1-2 min: every assertion runs the real computation on the bundled data
 uv run ruff check .
 ```
 
 `-q` prints nothing until it finishes, so the wait is expected rather than a hang — and if you
 only want a first look, `uv run pytest -q tests/test_data.py tests/test_server.py` covers the
-plumbing and the MCP round-trips in about 40 s. There is no faster honest version of the
+plumbing and the MCP round-trips in well under a minute. There is no faster honest version of the
 full run: the ground-truth assertions decompose the real matrix, which is the point of them.
 
 The test suite asserts known measured results — a specific boundary locus, compartment signs on named blocks, the P(s) slope, exact contact totals — so a regression that changes the science fails the build rather than passing quietly. The in-process tests run with sockets blocked, proving the demo needs no network. (The one test that launches the packaged server as a child process is outside that in-process patch — it is the round-trip a real client makes, and it reaches nothing but your own file.)
