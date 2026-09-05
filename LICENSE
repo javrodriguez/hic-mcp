@@ -19,11 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-Scope note: this MIT license covers the source code in this repository only.
-The bundled demo dataset under data/ is a derived subset of published,
-publicly released 4D Nucleome data and is redistributed under the 4DN Data
-Release and Use Policy - see data/PROVENANCE.md for full provenance,
-citations, and terms.

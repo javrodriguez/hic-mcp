@@ -186,6 +186,46 @@ full run: the ground-truth assertions decompose the real matrix, which is the po
 
 The test suite asserts known measured results — a specific boundary locus, compartment signs on named blocks, the P(s) slope, exact contact totals — so a regression that changes the science fails the build rather than passing quietly. The in-process tests run with sockets blocked, proving the demo needs no network. (The one test that launches the packaged server as a child process is outside that in-process patch — it is the round-trip a real client makes, and it reaches nothing but your own file.)
 
+## How this was built, and what the commit messages mean
+
+Many commit bodies in this repository refer to "rounds", "evaluators" and "findings". They are not
+noise, and this is what they mean.
+
+Every change here was graded by **three independent fresh-context evaluators per round**, each
+reading a clean clone blind, each given a byte-identical prompt, each writing its report before
+anything was fixed. Thirteen rounds ran: eight against the first design, then five more against a
+redesigned surface with a stricter stopping rule. Across them, **120 unique findings** were drawn
+from 159 raw evaluator reports — the gap is the same defect found independently by two or three
+evaluators. Every one was reproduced and fixed at root. No finding was overridden or downgraded.
+
+**The stopping rule was never met, and that is worth saying plainly.** "Done" required two
+consecutive rounds where all three evaluators returned clean. No round ever came back clean. The
+loop was stopped by a judgement call, not by convergence, so this repository is *not* certified by
+its own standard.
+
+That does not mean defects are outstanding — there is no known unfixed defect. It means each round
+kept finding a new instance of one class: **a road the test corpus never walks**. Region order,
+then region overlap, then bin-grid alignment. What decided the stop was round 5's largest finding
+being a defect inside round 4's own fix.
+
+What the loop actually caught, since that is the fairer measure:
+
+- an observed/expected matrix reading **936×** where it should read ~1
+- a P(s) slope computed file-wide but labelled with whatever region you asked for
+- a confidence figure computed over a single bin, which made the demo read as more certain than the
+  data supported
+
+Where it stands now: **191 tests**, ruff and mypy clean, CI green on Python 3.12 and 3.13, and a
+clean-clone walk that installs and passes in one to two minutes.
+
 ## License
 
-MIT — **source code only**. The bundled dataset carries its own terms; see [`LICENSE`](LICENSE) and [`data/PROVENANCE.md`](data/PROVENANCE.md).
+MIT — **source code only**.
+
+The bundled demo dataset under `data/` is not covered by the MIT licence. It is a derived subset of
+published, publicly released 4D Nucleome data, redistributed under the
+[4DN Data Release and Use Policy](https://github.com/4dn-dcic/4dn-policies/blob/master/4dn-data-release-and-use-policy.md).
+Full provenance, citations and terms are in [`data/PROVENANCE.md`](data/PROVENANCE.md).
+
+_(This scope note lives here rather than inside `LICENSE`, so that automated licence detection reads the
+source licence as plain MIT. The scope itself is unchanged.)_

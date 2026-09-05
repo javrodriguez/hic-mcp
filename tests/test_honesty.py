@@ -119,10 +119,28 @@ def test_readme_structure_and_config_parity():
 
 
 def test_license_scopes_itself_to_code():
-    """The data is not ours to license; the LICENSE must say so."""
-    text = " ".join((REPO / "LICENSE").read_text().split())  # normalize line wrapping
-    assert "source code in this repository only" in text
-    assert "4DN Data Release and Use Policy" in text
+    """The data is not ours to license, and the repository must say so.
+
+    The scope note lives in README.md and data/PROVENANCE.md rather than inside LICENSE,
+    so that automated licence detection reads the source licence as plain MIT. The
+    guarantee is unchanged and this test is stricter than the LICENSE-only version it
+    replaces: the statement must be present, AND LICENSE must stay clean so the badge
+    a reader sees matches the claim made about it.
+    """
+    readme = " ".join((REPO / "README.md").read_text().split())  # normalize line wrapping
+    assert "source code only" in readme
+    assert "4DN Data Release and Use Policy" in readme
+    assert "not covered by the MIT licence" in readme
+
+    provenance = " ".join((REPO / "data" / "PROVENANCE.md").read_text().split())
+    assert "4DN" in provenance
+
+    # LICENSE stays unmodified MIT: anything appended here breaks GitHub's detection and
+    # makes the repo page contradict the README. This is the half that regressed once.
+    license_text = " ".join((REPO / "LICENSE").read_text().split())
+    assert license_text.startswith("MIT License")
+    assert "Scope note" not in license_text
+    assert license_text.rstrip().endswith("DEALINGS IN THE SOFTWARE.")
 
 
 def test_every_tool_is_documented_in_the_readme_table():
