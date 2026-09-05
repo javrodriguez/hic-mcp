@@ -22,6 +22,9 @@ class MatrixSummary(BaseModel):
     chromosomes: dict[str, int] = Field(description="chromosome name -> length in bp")
     resolutions: list[ResolutionInfo]
     balanced: bool
+    balancing_scope: str = Field(
+        description="Whether weights were fitted per chromosome (cis-only) or genome-wide"
+    )
     provenance: dict = Field(default_factory=dict)
     method: str
 
@@ -96,6 +99,9 @@ class Compartments(BaseModel):
     confidence_note: str | None = None
     transition_note: str | None = None
     E1_track: list[E1Point] | None = None
+    E1_track_note: str | None = Field(
+        default=None, description="Set when the flanking track is downsampled for transport"
+    )
     A_fraction_of_file: float | None = Field(
         default=None, description="Only set when the eigenvector is phased; null otherwise"
     )

@@ -480,8 +480,11 @@ def test_user_can_supply_a_view_and_a_phasing_track(tmp_path, two_chromosome_coo
     pd.concat(frames).to_csv(track, sep="\t", index=False)
     phased = compartments(file=f, view=str(view), phasing_track=str(track), region="cA:0-300,000")
     assert phased["region_call"] in {"A", "B"}, phased["sign_convention"]
-    assert "UNPHASED" not in phased["sign_convention"]
     assert "Pearson r" in phased["sign_convention"]
+    # cB's half of this track is flat by construction, so the response says so per region
+    # rather than claiming a single verdict for both - the call for cA still stands
+    assert "cA" in phased["sign_convention"]
+    assert phased.get("confidence_note") is None
 
     # and the counterpart the fix exists for: noise orients nothing, so nothing is called
     noise = tmp_path / "noise.tsv"
@@ -1044,11 +1047,33 @@ def test_downsampling_ordinals_read_as_english():
     assert "2th" not in note and "3th" not in note and "1th" not in note
 
 
-def test_coverage_note_never_claims_more_than_the_bands_cover():
-    """It once reported a 20 Mb window while the bands stop at 10 Mb."""
-    out = virtual_4c(viewpoint="chr17:63,000,000-63,100,000", window_bp=20_000_000)
-    assert "10,000,000 bp" in out["coverage_note"]
+def test_coverage_note_states_both_scopes_and_both_are_true():
+    """The note describes TWO different limits, and each must match the data returned.
+
+    It once claimed 20 Mb while the bands stopped at 10 Mb; the correction moved the claim
+    to 10 Mb while the PROFILE still carried measurements to 20 Mb - the fix swapped one
+    wrong number for another, and this test green-lit it because it asserted a substring
+    rather than a true statement. It now checks the profile's real extent and the bands'
+    real extent against what the sentence says about each.
+    """
+    window = 20_000_000
+    out = virtual_4c(viewpoint="chr17:63,000,000-63,100,000", window_bp=window,
+                     resolution=100_000)
+    note = out["coverage_note"]
+    assert f"{window:,} bp" in note and "10,000,000 bp" in note, note
     assert out["distance_bands_cover_bp"] == [0, 10_000_000]
+    centre = (63_000_000 + 63_100_000) // 2
+    binsize = out["resolution_used"]
+    reach = max(abs(pt["start"] + binsize // 2 - centre) for pt in out["profile_points"])
+    assert reach > 10_000_000, "the profile no longer exceeds the band limit; case is moot"
+    assert reach <= window + binsize, f"profile reaches {reach:,}, past the stated {window:,}"
+
+    # and the ordinary case: a window inside the bands must not claim the bands truncate it
+    narrow = virtual_4c(viewpoint="chr17:63,000,000-63,100,000", window_bp=1_000_000,
+                        resolution=100_000)
+    assert "1,000,000 bp" in narrow["coverage_note"]
+    n_reach = max(abs(pt["start"] + binsize // 2 - centre) for pt in narrow["profile_points"])
+    assert n_reach <= 1_000_000 + binsize
 
 
 def test_raw_only_request_says_why_there_is_no_matrix():
@@ -1115,3 +1140,56 @@ def test_the_sparse_road_names_itself_whichever_flag_the_caller_passed(balanced)
     assert "sparse pixel table" in out["note"], out["note"]
     if not balanced:
         assert "you passed balanced=false" in out["note"]
+
+
+
+def test_a_track_that_orients_one_region_does_not_orient_another(tmp_path):
+    """E1's sign is flipped independently inside each view region, so the guard must be too.
+
+    A single pooled correlation let a track that orients only the biggest region switch
+    labelling on for all of them: a track perfect on chr17q (r = 1.0) and pure noise on
+    chr17p (r = 0.02-0.14) reported a pooled r of 0.82 and returned confident A/B calls for
+    chr17p that flipped with the noise seed - the same matrix, the same |E1|, a different
+    letter. The guard's scope and the computation's scope have to be the same scope.
+    """
+    import numpy as np
+    from cooltools import eigs_cis
+
+    from hic_mcp.data import demo_path, load_arms_view, open_matrix
+
+    clr = open_matrix(demo_path(), 100_000, default=100_000)
+    vdf = load_arms_view()
+    _, evec = eigs_cis(clr, phasing_track=None, view_df=vdf, n_eigs=3)
+    ev = evec.dropna(subset=["E1"]).copy()
+    p_end = int(vdf.iloc[0]["end"])
+
+    calls = set()
+    for seed in (1, 4, 6):
+        track = ev[["chrom", "start", "end"]].copy()
+        val = ev["E1"].to_numpy().copy()
+        is_p = ev["start"].to_numpy() < p_end
+        val[is_p] = np.random.default_rng(seed).permutation(val[is_p])
+        track["GC"] = val
+        path = tmp_path / f"perarm_{seed}.tsv"
+        track.to_csv(path, sep="\t", index=False)
+        out = compartments(region="chr17:10,000,000-11,000,000", resolution=100_000,
+                           phasing_track=str(path))
+        calls.add(out["region_call"])
+        # the primary property first: no letter at all for a region nothing oriented
+        assert out["region_call"] == "unphased", (
+            f"seed {seed}: called {out['region_call']} on an arm the track does not orient "
+            f"-- {out['sign_convention']}"
+        )
+        # and the response must quote the r of the region asked about, not a pooled figure
+        assert "chr17p" in out["sign_convention"], out["sign_convention"]
+        assert out.get("confidence_note") and "chr17p" in out["confidence_note"]
+    assert calls == {"unphased"}, f"a seed-dependent A/B call survived: {calls}"
+
+
+def test_the_demo_says_why_its_own_track_was_not_used():
+    """Telling someone to find a GC track when the repo ships one is advice they cannot act on."""
+    out = compartments(region="chr17:50,100,000-51,100,000", resolution=10_000)
+    assert out["region_call"] == "unphased"
+    note = out["sign_convention"]
+    assert "bundled GC track" in note and "100,000 bp" in note, note
+    assert "resolution=100000" in note, note

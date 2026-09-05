@@ -97,6 +97,25 @@ def _insulation_cached(clr: Cooler, windows: tuple[int, ...], view_df) -> pd.Dat
     return hit.copy()
 
 
+def _balancing_scope_label(clrs: list) -> str:
+    """Whether the weights in this file were fitted per chromosome or genome-wide."""
+    scopes = set()
+    for c in clrs:
+        if not _weights_present(c):
+            continue
+        scopes.add("cis-only" if _balanced_cis_only(c) else "genome-wide")
+    if not scopes:
+        return "not balanced"
+    if scopes == {"cis-only"}:
+        return (
+            "cis-only - weights were fitted per chromosome, so no balanced values exist "
+            "for trans (inter-chromosomal) blocks"
+        )
+    if scopes == {"genome-wide"}:
+        return "genome-wide - balanced values exist for cis and trans blocks alike"
+    return "mixed across resolutions - check each resolution before using trans blocks"
+
+
 def _bins_spanned(clr: Cooler, region: str) -> int:
     """How many bins cooler will actually return for this region.
 
@@ -293,9 +312,11 @@ def matrix_summary(file: str | None = None) -> dict:
     path = resolve_input_path(file)
     resolutions = list_resolutions(path)
     per_res = []
+    opened = []
     meta: dict = {}
     for res in resolutions:
         clr = open_matrix(path, res, res)
+        opened.append(clr)
         info = clr.info
         per_res.append(
             {
@@ -324,6 +345,11 @@ def matrix_summary(file: str | None = None) -> dict:
         "chromosomes": {str(c): int(s) for c, s in clr.chromsizes.items()},
         "resolutions": per_res,
         "balanced": all(r["balanced"] for r in per_res),
+        # `balanced: true` alone let an agent plan trans work on a cis-only file and find
+        # out only at the point of use. contacts_at_locus already refuses to call a trans
+        # block balanced on such a file; this is the tool the instructions say to START
+        # with, so it says the same thing here, in the field that already exists.
+        "balancing_scope": _balancing_scope_label(opened),
         "provenance": meta,
         "method": "cooler.Cooler.info over every resolution in the file",
     }
@@ -671,13 +697,63 @@ def compartments(
         phasing = None
     coverage_warning = None
     if phasing is not None:
-        spans = (phasing["end"] - phasing["start"]).unique()
-        if len(spans) and int(spans[0]) != int(clr.binsize):
+        # Three ways a track can fail to sit on the matrix's grid, all of them ordinary
+        # (a bedGraph from another pipeline routinely starts at a different offset). Only
+        # the first was checked, and only on ROW 0 - so a mixed-binned track and an
+        # off-grid track both fell through cooltools and reached the agent as "this is a
+        # bug in hic-mcp, not in your request", which was wrong three times over: not a
+        # bug, it IS the request, and the remedy named could not fix it.
+        # A chromosome's LAST interval is legitimately short - the bundled GC track's
+        # final chr17 bin is 57,441 bp - so it never counts toward the width check.
+        widths_all = (phasing["end"] - phasing["start"]).to_numpy()
+        is_last = (
+            phasing.groupby("chrom")["start"].transform("max") == phasing["start"]
+        ).to_numpy()
+        full_widths = widths_all[~is_last]
+        widths = {int(x) for x in (full_widths if len(full_widths) else widths_all)}
+        if len(widths) > 1:
+            shown = ", ".join(f"{w:,}" for w in sorted(widths)[:4])
             raise AnalysisError(
-                f"The phasing track is binned at {int(spans[0]):,} bp but this analysis "
+                f"The phasing track mixes interval widths ({shown} bp); cooltools needs "
+                f"one width matching this matrix's {int(clr.binsize):,} bp bins. Re-bin "
+                "the track onto a single grid before passing it. (A chromosome's final "
+                "partial interval is fine and is not counted here.)"
+            )
+        if widths and int(next(iter(widths))) != int(clr.binsize):
+            tw = int(next(iter(widths)))
+            raise AnalysisError(
+                f"The phasing track is binned at {tw:,} bp but this analysis "
                 f"runs at {int(clr.binsize):,} bp; cooltools needs them to match. Pass "
-                f"resolution={int(spans[0])} to use the track's own binning, or supply a "
+                f"resolution={tw} to use the track's own binning, or supply a "
                 f"track binned at {int(clr.binsize):,} bp."
+            )
+        # A track with no variance cannot orient anything, and cooltools' Spearman step
+        # returns NaN for it - which propagated to an empty eigenvector and surfaced as
+        # "the region may be entirely ICE-filtered", blaming the data for the track.
+        _tv = pd.to_numeric(phasing.iloc[:, 3], errors="coerce").to_numpy(dtype=float)
+        _tv = _tv[np.isfinite(_tv)]
+        # ptp, not std: the std of identical float values accumulates to ~5e-17, so an
+        # `== 0.0` test silently missed the exact case it was written for.
+        if len(_tv) and float(np.ptp(_tv)) == 0.0:
+            raise AnalysisError(
+                f"The phasing track's values are all identical ({_tv[0]:g}), so it carries "
+                "no information to orient the eigenvector with. Supply a track that varies "
+                "with compartment identity (GC fraction, gene density), or omit "
+                "phasing_track to get an explicitly unphased answer."
+            )
+        # cooltools matches a track to bins by COORDINATE, so a track of the right width
+        # sitting at the wrong offset assigns no values at all and fell through to a bare
+        # library error the agent was told was a bug in this server.
+        off_grid = phasing["start"].to_numpy() % int(clr.binsize)
+        if (off_grid != 0).any():
+            first = int(phasing["start"].to_numpy()[off_grid != 0][0])
+            raise AnalysisError(
+                f"The phasing track's intervals do not start on this matrix's bin grid - "
+                f"{int((off_grid != 0).sum()):,} of {len(phasing):,} rows are offset (the "
+                f"first at {first:,}, which is not a multiple of {int(clr.binsize):,}). "
+                "cooltools matches a track to bins by coordinate, so an offset track "
+                f"assigns no values at all. Re-bin the track onto multiples of "
+                f"{int(clr.binsize):,} bp."
             )
         # cooltools requires the track to cover EVERY region it decomposes. With no view
         # that means every chromosome in the FILE - which is the default for a user's own
@@ -745,7 +821,14 @@ def compartments(
     # whose values were shuffled (same bins, same numbers, relationship destroyed) passed
     # every existing guard and inverted every label in the file, reporting the repo's own
     # documented A block as B with sign consistency 1.0 and no caveat anywhere.
-    phasing_r: float | None = None
+    # ...and it must be measured PER VIEW REGION, because eigs_cis flips the sign of E1
+    # independently within each one. A single pooled r let a track that orients only the
+    # biggest region switch labelling on for all of them: a track perfect on chr17q (r=1.0)
+    # and pure noise on chr17p (r=0.02-0.14) reported a pooled r of 0.82 and returned
+    # confident A/B calls for chr17p that flipped with the noise seed. The guard's scope and
+    # the computation's scope have to be the same scope.
+    merged = None
+    region_r: dict[str, float | None] = {}
     if phasing is not None:
         merged = eigvecs.dropna(subset=["E1"]).merge(
             phasing.set_axis(["chrom", "start", "end", "_track"], axis=1)[
@@ -754,35 +837,71 @@ def compartments(
             on=["chrom", "start"],
             how="inner",
         ).dropna(subset=["_track"])
-        if len(merged) >= 3 and merged["E1"].std() > 0 and merged["_track"].std() > 0:
-            phasing_r = float(np.corrcoef(merged["E1"], merged["_track"])[0, 1])
-    # Below the threshold the tool returns to the behaviour it already has for no track at
-    # all: say unphased and refuse to label. Guessing quietly is the one thing the README
-    # promises it will not do.
-    phased = phasing is not None and phasing_r is not None and abs(phasing_r) >= MIN_PHASING_R
+        for _, rr in eigvals.iterrows():
+            name = str(rr["name"] if "name" in rr else rr["chrom"])
+            sel = merged[
+                (merged["chrom"] == rr["chrom"])
+                & (merged["start"] >= int(rr["start"]))
+                & (merged["start"] < int(rr["end"]))
+            ]
+            if len(sel) >= 3 and sel["E1"].std() > 0 and sel["_track"].std() > 0:
+                region_r[name] = float(np.corrcoef(sel["E1"], sel["_track"])[0, 1])
+            else:
+                region_r[name] = None
+
+    def _region_phased(name: str) -> bool:
+        r = region_r.get(name)
+        return phasing is not None and r is not None and abs(r) >= MIN_PHASING_R
+
+    # A file-wide claim needs EVERY region oriented; one unoriented arm makes the fraction
+    # a mix of a measurement and a coin flip.
+    phased = phasing is not None and bool(region_r) and all(
+        _region_phased(n) for n in region_r
+    )
     phasing_source = (
         "the track you supplied"
         if phasing_track is not None
         else "the bundled GC track"
     )
+    _rs = ", ".join(
+        f"{n} r = {region_r[n]:.4g}" if region_r[n] is not None else f"{n} r = not measurable"
+        for n in region_r
+    )
     if phased:
         sign_convention = (
             f"oriented by {phasing_source} (positive E1 = A, i.e. higher track value = A); "
-            f"Pearson r = {phasing_r:.4g} between E1 and the track over the "
-            f"{len(merged):,} bins decomposed"
+            f"E1 is flipped independently within each view region, so Pearson r against the "
+            f"track is given per region: {_rs}"
         )
     elif phasing is not None:
+        weak = [n for n in region_r if not _region_phased(n)]
         sign_convention = (
-            "UNPHASED - " + (
-                f"{phasing_source} correlates with E1 at Pearson r = {phasing_r:.4g} over the "
-                f"{len(merged):,} bins decomposed, below the {MIN_PHASING_R} needed to orient "
-                "the sign. "
-                if phasing_r is not None
-                else f"{phasing_source} carries no usable variation against E1. "
+            f"PARTLY UNPHASED - {phasing_source} orients some view regions and not others, "
+            f"and E1's sign is flipped independently within each (Pearson r per "
+            f"region: {_rs}). Below "
+            f"|r| = {MIN_PHASING_R} a region is not oriented at all, so no A/B label is "
+            f"given for {', '.join(weak)} - a label there would be a coin flip reported as "
+            "a result. Supply a track that tracks compartment identity (GC fraction, gene "
+            "density) across every region, at this resolution."
+            if any(_region_phased(n) for n in region_r)
+            else (
+                f"UNPHASED - {phasing_source} does not correlate with E1 in any view "
+                f"region (Pearson r per region: {_rs}), so it orients nothing and A vs B "
+                "is not called rather than "
+                "guessed. Supply a track that tracks compartment identity (GC fraction, "
+                "gene density) at this resolution."
             )
-            + "A track that does not correlate with E1 orients nothing, so A vs B is not "
-            "called rather than guessed. Supply a track that tracks compartment identity "
-            "(GC fraction, gene density) at this resolution."
+        )
+    elif is_demo(path):
+        # the bundled track exists but is tied to its own binning; saying "go and find a
+        # GC track" to someone who already has ours, without naming the one fact that
+        # would unblock them, is advice that cannot be acted on
+        sign_convention = (
+            "UNPHASED - the sign of E1 is mathematically arbitrary, and the bundled GC "
+            f"track is binned at 100,000 bp while this analysis is running at "
+            f"{int(clr.binsize):,} bp, so it was not used. Call compartments at "
+            "resolution=100000 for phased A/B calls on the bundled demo, or pass "
+            f"phasing_track binned at {int(clr.binsize):,} bp."
         )
     else:
         sign_convention = (
@@ -841,7 +960,22 @@ def compartments(
         mean_e1 = float(sub["E1"].mean())
         out["region"] = region
         out["region_mean_E1"] = _finite(mean_e1)
-        out["region_call"] = ("A" if mean_e1 > 0 else "B") if phased else "unphased"
+        # the call honours the r of the region this query actually fell in, not a pooled
+        # figure: the sign was flipped inside that region and nowhere else
+        here = str(spanned.iloc[0]["name"]) if view_df is not None and len(spanned) else (
+            next(iter(region_r)) if len(region_r) == 1 else chrom
+        )
+        here_phased = _region_phased(here) if region_r else phased
+        out["region_call"] = ("A" if mean_e1 > 0 else "B") if here_phased else "unphased"
+        if phasing is not None and not here_phased:
+            out["confidence_note"] = (
+                "No A/B label for this region: the phasing track correlates with E1 at "
+                + (f"r = {region_r.get(here):.4g}" if region_r.get(here) is not None
+                   else "an unmeasurable r")
+                + f" within {here}, below the |r| = {MIN_PHASING_R} needed to orient the "
+                "sign there. E1's sign is flipped independently inside each view region, "
+                "so a track that orients another region does not orient this one."
+            )
         out["bins_used"] = int(len(sub))
         # a single bin is trivially "100% consistent with itself"; reporting that as
         # confidence invites an agent to call a knife-edge locus unambiguous
@@ -862,10 +996,23 @@ def compartments(
         lo = start - flank * int(clr.binsize)
         hi = end + flank * int(clr.binsize)
         ctx = vec[(vec["chrom"] == chrom) & (vec["end"] > lo) & (vec["start"] < hi)]
-        if len(ctx) <= 200:
+        # Above the cap this used to return NOTHING, silently - no track, no transition
+        # note, no word that either had been withheld. Every other cap in this server
+        # announces itself, and this is the field confidence_note points readers at.
+        # Downsample the way virtual_4c does, and compute the transition from the FULL
+        # neighbourhood regardless of what is listed.
+        if len(ctx):
+            ctx_stride = max(1, -(-len(ctx) // 200))
+            listed = ctx.iloc[::ctx_stride]
             out["E1_track"] = [
-                {"start": int(r.start), "E1": _finite(r.E1)} for r in ctx.itertuples()
+                {"start": int(r.start), "E1": _finite(r.E1)} for r in listed.itertuples()
             ]
+            if ctx_stride > 1:
+                out["E1_track_note"] = (
+                    f"{len(ctx)} bins flank this region; {len(listed)} are listed (every "
+                    f"{_ordinal(ctx_stride)}, for transport). The sign check below reads "
+                    "every bin, not the listed subset."
+                )
             signs = np.sign(ctx["E1"].to_numpy())
             if len(set(signs[signs != 0])) > 1:
                 out["transition_note"] = (
@@ -1018,11 +1165,13 @@ def virtual_4c(
                 if snapped_from
                 else ""
             )
-            + f"{n} mappable bins are reported"
+            # "N bins are reported" beside a list of far fewer contradicted itself, and N
+            # is the number an agent quotes; say what was measured and what is listed.
             + (
-                f"; downsampled to every {_ordinal(stride)} point for transport"
+                f"{n} mappable bins were measured; {len(idx)} points are listed "
+                f"(every {_ordinal(stride)}, for transport)"
                 if stride > 1
-                else ""
+                else f"{n} mappable bins are reported"
             )
             + ". One convention throughout: a mappable bin with no contacts is a genuine "
             "zero, in the points and in the band means alike; ICE-filtered bins and the "
@@ -1036,15 +1185,19 @@ def virtual_4c(
         ),
         "coverage_note": (
             (
-                f"Both the profile and the band means are limited to "
-                f"{min(window_bp, bands[-1][1]):,} bp around the viewpoint"
+                # Two DIFFERENT scopes, and saying one number for both made this field
+                # describe data it did not describe: the profile really is limited to
+                # window_bp, while the bands stop at their own last edge, so a 20 Mb
+                # window carried measurements to 20 Mb under a note claiming 10 Mb.
+                f"The profile is limited to {window_bp:,} bp around the viewpoint, as "
+                f"requested. The band means stop at {bands[-1][1]:,} bp"
                 + (
-                    f" (you asked for {window_bp:,} bp; the bands themselves stop at "
-                    f"{bands[-1][1]:,} bp)"
+                    ", so separations between those two limits appear in the profile and "
+                    "in no band."
                     if window_bp > bands[-1][1]
-                    else ", as requested"
+                    else ", which is beyond your window, so every band is inside it."
                 )
-                + ". A band straddling the limit keeps its full label but covers only "
+                + " A band straddling the limit keeps its full label but covers only "
                 "the part inside it."
             )
             if window_bp is not None

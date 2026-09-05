@@ -33,6 +33,11 @@ Then add it to your MCP client. **Claude Desktop** — paste into `claude_deskto
 claude mcp add hic-mcp -- uv --directory /ABS/PATH/TO/hic-mcp run hic-mcp
 ```
 
+Both roads assume [`uv`](https://docs.astral.sh/uv/) is installed and on your PATH. GUI clients
+launch without a login shell, so a `uv` in `~/.local/bin` is often invisible to them — if your
+client reports it cannot spawn `uv`, replace `"command": "uv"` with the absolute path that
+`which uv` prints.
+
 Now ask your agent: *"Find the strongest TAD boundary in the demo Hi-C data, then tell me which compartment it sits in."*
 
 ## What that actually returns
@@ -102,7 +107,7 @@ Point any tool at your own file with `file="/path/to/yours.mcool"`; omit it to u
 - `view` — a tab-separated BED-like file (`chrom`/`start`/`end`[/`name`]) partitioning the genome into regions analysed independently. Hi-C statistics should not be normalised across a centromere, so pass chromosome arms here; without it the tools fall back to whole chromosomes and say so in the `view` field they return.
 - `phasing_track` — a `chrom`/`start`/`end`/`value` file (GC fraction, gene density) that orients the compartment eigenvector. Without it the sign of E1 is arbitrary, so `compartments` reports `unphased` and refuses to label A or B rather than guessing.
 
-The bundled demo ships both, which is why it gets phased A/B calls and arm-partitioned scores out of the box.
+The bundled demo ships both. The arm view applies at any resolution; the GC track is binned at 100 kb, so out-of-the-box phased A/B calls come at `resolution=100000` (which is `compartments`' default). At another resolution the response says so and names the fix, rather than telling you to go and find a track you already have.
 
 **Two things worth knowing before you point it at a large file.** The `region` argument filters what is *reported*, not what is *computed* — insulation, compartments and expected curves are calculated across the whole chromosome (or arm) either way, so a genome-wide 10 kb `.mcool` will take minutes per call, not seconds. And the bundled demo dataset lives in this repository, not in the built package: install from a clone to get it, or pass your own file.
 
@@ -154,7 +159,7 @@ only want a first look, `uv run pytest -q tests/test_data.py tests/test_server.p
 plumbing and the MCP round-trips in about 40 s. There is no faster honest version of the
 full run: the ground-truth assertions decompose the real matrix, which is the point of them.
 
-The test suite asserts known measured results — a specific boundary locus, compartment signs on named blocks, the P(s) slope, exact contact totals — so a regression that changes the science fails the build rather than passing quietly. Tests run with sockets blocked, proving the demo needs no network.
+The test suite asserts known measured results — a specific boundary locus, compartment signs on named blocks, the P(s) slope, exact contact totals — so a regression that changes the science fails the build rather than passing quietly. The in-process tests run with sockets blocked, proving the demo needs no network. (The one test that launches the packaged server as a child process is outside that in-process patch — it is the round-trip a real client makes, and it reaches nothing but your own file.)
 
 ## License
 
