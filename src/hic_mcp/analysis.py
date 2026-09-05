@@ -7,8 +7,10 @@ from the data helpers) with agent-facing messages.
 """
 
 import json
+from pathlib import Path
 
 import numpy as np
+import pandas as pd
 from cooler import Cooler
 from cooltools import eigs_cis, expected_cis, insulation, virtual4c
 
@@ -34,7 +36,11 @@ PROFILE_POINT_CAP = 400
 IGNORE_DIAGS = 2  # cooltools' expected default: the first 2 diagonals carry no measurement
 CLASSIC_TAD_WINDOWS = (100_000, 250_000, 500_000)  # mammalian TAD scale
 COARSE_WINDOW_BINS = (3, 5, 10)  # fallback multipliers when bins are too big for the above
-MIN_BINS_FOR_CONSISTENCY = 3  # below this a sign-consistency figure is vacuous
+MIN_BINS_FOR_CONSISTENCY = 3
+# Below this |r| between E1 and the phasing track, the track orients nothing and the tool
+# returns to its own unphased behaviour. The bundled GC track scores 0.4607; a shuffled
+# copy of it scores 0.05 and used to produce confident, inverted A/B calls.
+MIN_PHASING_R = 0.2  # below this a sign-consistency figure is vacuous
 VIEWPOINT_MAX_BINS = 10  # a virtual-4C viewpoint is an anchor, not a region
 COMPARTMENT_MEMORY_CAP_GB = 4.0  # eigs_cis densifies per region; refuse before the OOM
 DENSE_FETCH_CAP_GB = 0.5  # above this, contacts_at_locus answers from sparse pixels instead
@@ -54,6 +60,56 @@ def _finite(x: float) -> float | None:
     a P(s) curve into a run of identical constants.
     """
     return float(f"{float(x):.6g}") if np.isfinite(x) else None
+
+
+_INSULATION_CACHE: dict[tuple, pd.DataFrame] = {}
+_INSULATION_CACHE_MAX = 8
+
+
+def _insulation_cached(clr: Cooler, windows: tuple[int, ...], view_df) -> pd.DataFrame:
+    """insulation() over one file, binning, window set and view, computed once.
+
+    `region` filters what is REPORTED, not what is computed - documented, and correct - so
+    the same whole-chromosome decomposition was recomputed from scratch about eleven times
+    per test run at ~15 s each, single-threaded. The inputs are immutable per call and the
+    result is a plain frame, so the repeat is pure waste. A copy is returned so no caller
+    can mutate another's result.
+    """
+    # uri identifies file AND resolution; mtime+size mean a file edited on disk is a
+    # different key rather than a stale hit.
+    try:
+        st = Path(str(clr.filename)).stat()
+        stamp: tuple = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        stamp = ()
+    key = (
+        str(clr.uri),
+        stamp,
+        windows,
+        None if view_df is None else tuple(map(tuple, view_df.to_numpy().tolist())),
+    )
+    hit = _INSULATION_CACHE.get(key)
+    if hit is None:
+        hit = insulation(clr, list(windows), view_df=view_df, verbose=False)
+        if len(_INSULATION_CACHE) >= _INSULATION_CACHE_MAX:
+            _INSULATION_CACHE.pop(next(iter(_INSULATION_CACHE)))
+        _INSULATION_CACHE[key] = hit
+    return hit.copy()
+
+
+def _bins_spanned(clr: Cooler, region: str) -> int:
+    """How many bins cooler will actually return for this region.
+
+    cooler fetches every bin the region OVERLAPS - ceil(end/res) - floor(start/res) - which
+    equals ceil((end-start)/res) only when the start sits on a bin boundary. Every coordinate
+    in this repo's tests, README, examples and demo happens to be a round multiple of the bin
+    size, so the span quotient agreed everywhere it was checked and disagreed everywhere it
+    was not: shape_bins said 20 beside a 21x21 matrix, and the sparse road's nonzero_fraction
+    - real cells over an arithmetic denominator - left the unit interval at 1.0396.
+    Ask the file, never the arithmetic.
+    """
+    lo, hi = clr.extent(region)
+    return int(hi - lo)
 
 
 def _dense_cells_from_pixels(clr: Cooler, balance: bool, r1: str, r2: str, symmetric: bool):
@@ -311,8 +367,8 @@ def contacts_at_locus(
     # first, and this one fetched a whole chromosome at 10 kb (1.5 GB) to return a few
     # scalars. Above the cap the same statistics come from the sparse pixel table instead,
     # so the tool answers rather than refuses.
-    n1 = -(-(end - start) // resolution)
-    n2 = -(-(e2 - s2) // resolution)
+    n1 = _bins_spanned(clr, r1)
+    n2 = _bins_spanned(clr, r2)
     dense_gb = 8 * n1 * n2 / 1e9
     sparse_mode = dense_gb > DENSE_FETCH_CAP_GB or max(n1, n2) > MATRIX_BIN_CAP * 4
     if region2 is None:
@@ -369,19 +425,35 @@ def contacts_at_locus(
         # the tool description promises a matrix for small windows; when the caller asked
         # for raw counts (or the file has no weights) there is simply nothing balanced to
         # return, and silence reads as a missing result rather than a deliberate one
+        # (the ternary this replaced had an unreachable else arm: inside this branch
+        # `not use_weights` already implies the condition)
         out["note"] = (
             "No balanced values were requested or available, so balanced_matrix is null "
             "and only raw counts are reported"
             + ("" if balanced else " (you passed balanced=false)")
             + "."
-            if not _weights_present(clr) or not balanced
-            else out.get("note")
         )
     # always present, null when not computed - an absent key reads as "not applicable"
     # in one client and "missing" in another
     out.setdefault("balanced_mean", None)
     out.setdefault("balanced_max", None)
     out.setdefault("balanced_matrix", None)
+    if sparse_mode:
+        # This server discloses which road produced a number everywhere else; it used to
+        # go silent here whenever balanced=False, attributing the missing matrix entirely
+        # to the caller's flag when the bin cap was the operative reason.
+        reason = (
+            f"would need {dense_gb:.1f} GB as a dense matrix"
+            if dense_gb > DENSE_FETCH_CAP_GB
+            else f"exceeds {MATRIX_BIN_CAP * 4} bins on a side"
+        )
+        sparse_note = (
+            f"{n1}x{n2} bins {reason}, so the statistics were computed from the sparse "
+            "pixel table and the matrix itself is not returned. Narrow the region or use "
+            "a coarser resolution."
+        )
+        existing = out.get("note")
+        out["note"] = f"{existing} {sparse_note}" if existing else sparse_note
     if use_weights and sparse_mode:
         bpix, bdiag, _ = _dense_cells_from_pixels(clr, True, r1, r2, symmetric)
         bvals = bpix["balanced"].to_numpy()
@@ -399,16 +471,6 @@ def contacts_at_locus(
         out["balanced_mean"] = _finite(total / cells) if cells else None
         out["balanced_max"] = _finite(bvals[finite].max()) if finite.any() else None
         out["balanced_matrix"] = None
-        reason = (
-            f"would need {dense_gb:.1f} GB as a dense matrix"
-            if dense_gb > DENSE_FETCH_CAP_GB
-            else f"exceeds {MATRIX_BIN_CAP * 4} bins on a side"
-        )
-        out["note"] = (
-            f"{n1}x{n2} bins {reason}, so the statistics were computed from the sparse "
-            "pixel table and the matrix itself is not returned. Narrow the region or use "
-            "a coarser resolution."
-        )
     elif use_weights and raw is not None and raw.size:
         bal = clr.matrix(balance=True).fetch(r1, r2)
         finite_bal = bal[np.isfinite(bal)]
@@ -483,7 +545,7 @@ def insulation_tads(
     # the diamond score and measures boundary prominence ACROSS the centromeric gap,
     # which shifts every score by a per-arm offset and can reorder the top boundaries
     view_df = _resolve_view(path, view, clr)
-    ins = insulation(clr, windows, view_df=view_df, verbose=False)
+    ins = _insulation_cached(clr, tuple(int(w) for w in windows), view_df)
     if region is not None:
         chrom, start, end = parse_region_checked(clr, region)
         # NO single-region containment check here: insulation is per bin, so `region`
@@ -677,18 +739,57 @@ def compartments(
                 "limited to the regions it covers."
             )
     eigvals, eigvecs = eigs_cis(clr, phasing_track=phasing, view_df=view_df, n_eigs=3)
+    # Does the track actually orient anything? cooltools flips E1 to a positive correlation
+    # with the track WHATEVER that correlation is, including r ~ 0 - so binning, coverage and
+    # density all passing says nothing about whether the A/B labels mean anything. A track
+    # whose values were shuffled (same bins, same numbers, relationship destroyed) passed
+    # every existing guard and inverted every label in the file, reporting the repo's own
+    # documented A block as B with sign consistency 1.0 and no caveat anywhere.
+    phasing_r: float | None = None
+    if phasing is not None:
+        merged = eigvecs.dropna(subset=["E1"]).merge(
+            phasing.set_axis(["chrom", "start", "end", "_track"], axis=1)[
+                ["chrom", "start", "_track"]
+            ],
+            on=["chrom", "start"],
+            how="inner",
+        ).dropna(subset=["_track"])
+        if len(merged) >= 3 and merged["E1"].std() > 0 and merged["_track"].std() > 0:
+            phasing_r = float(np.corrcoef(merged["E1"], merged["_track"])[0, 1])
+    # Below the threshold the tool returns to the behaviour it already has for no track at
+    # all: say unphased and refuse to label. Guessing quietly is the one thing the README
+    # promises it will not do.
+    phased = phasing is not None and phasing_r is not None and abs(phasing_r) >= MIN_PHASING_R
     phasing_source = (
         "the track you supplied"
         if phasing_track is not None
         else "the bundled GC track"
     )
-    sign_convention = (
-        f"oriented by {phasing_source} (positive E1 = A, i.e. higher track value = A)"
-        if phasing is not None
-        else "UNPHASED - the sign of E1 is mathematically arbitrary. Pass phasing_track "
-        "(a tab-separated chrom/start/end/value file, e.g. GC fraction) to orient it "
-        "before calling A vs B"
-    )
+    if phased:
+        sign_convention = (
+            f"oriented by {phasing_source} (positive E1 = A, i.e. higher track value = A); "
+            f"Pearson r = {phasing_r:.4g} between E1 and the track over the "
+            f"{len(merged):,} bins decomposed"
+        )
+    elif phasing is not None:
+        sign_convention = (
+            "UNPHASED - " + (
+                f"{phasing_source} correlates with E1 at Pearson r = {phasing_r:.4g} over the "
+                f"{len(merged):,} bins decomposed, below the {MIN_PHASING_R} needed to orient "
+                "the sign. "
+                if phasing_r is not None
+                else f"{phasing_source} carries no usable variation against E1. "
+            )
+            + "A track that does not correlate with E1 orients nothing, so A vs B is not "
+            "called rather than guessed. Supply a track that tracks compartment identity "
+            "(GC fraction, gene density) at this resolution."
+        )
+    else:
+        sign_convention = (
+            "UNPHASED - the sign of E1 is mathematically arbitrary. Pass phasing_track "
+            "(a tab-separated chrom/start/end/value file, e.g. GC fraction) to orient it "
+            "before calling A vs B"
+        )
     out: dict = {
         "resolution_used": int(clr.binsize),
         "view": _view_label(view_df, view_arg_used, path),
@@ -740,7 +841,7 @@ def compartments(
         mean_e1 = float(sub["E1"].mean())
         out["region"] = region
         out["region_mean_E1"] = _finite(mean_e1)
-        out["region_call"] = ("A" if mean_e1 > 0 else "B") if phasing is not None else "unphased"
+        out["region_call"] = ("A" if mean_e1 > 0 else "B") if phased else "unphased"
         out["bins_used"] = int(len(sub))
         # a single bin is trivially "100% consistent with itself"; reporting that as
         # confidence invites an agent to call a knife-edge locus unambiguous
@@ -775,7 +876,7 @@ def compartments(
         positive_fraction = round(float((vec["E1"] > 0).mean()), 3)
         # the fraction covers whatever the FILE holds - one chromosome for the demo - so
         # its name says "file", never "genome"
-        if phasing is not None:
+        if phased:
             out["A_fraction_of_file"] = positive_fraction
         else:
             # unphased: the sign is arbitrary, so an "A fraction" would be an unfounded claim
@@ -811,14 +912,30 @@ def virtual_4c(
             f"({VIEWPOINT_MAX_BINS} bins). Name a locus, e.g. '{chrom}:{start:,}-"
             f"{start + int(clr.binsize):,}', or use contacts_at_locus for a wide region."
         )
-    if end - start < int(clr.binsize):
-        # pad to a whole bin, but never past the chromosome's own end
-        chrom_end = int(clr.chromsizes[chrom])
-        end = min(start + int(clr.binsize), chrom_end)
-        start = max(0, min(start, end - 1))
+    # Snap the anchor to whole bins BEFORE cooltools sees it. cooltools splits the bin table
+    # at the viewpoint's own boundaries, so an unaligned viewpoint comes back with two extra
+    # rows and every positional mask below stops broadcasting - a bare ValueError the agent
+    # was then told was a bug in this server. Only viewpoints landing exactly on bin edges
+    # worked at all, which the suite never noticed because every committed coordinate is a
+    # round multiple of the bin size. A TSS, an enhancer or a coordinate pasted from a genome
+    # browser essentially never is. Padding a sub-bin anchor is the same rule, so it folds in.
+    bs = int(clr.binsize)
+    chrom_end = int(clr.chromsizes[chrom])
+    snapped_from = (start, end) if (start % bs or end % bs) else None
+    start = (start // bs) * bs
+    end = min(-(-end // bs) * bs, chrom_end)
+    if end <= start:  # the anchor sat inside the final partial bin
+        start = max(0, end - bs)
     _check_viewpoint_not_filtered(clr, chrom, start, end)
     prof = virtual4c(clr, f"{chrom}:{start}-{end}")
     prof = prof[prof["chrom"] == chrom].reset_index(drop=True)
+    # Align the profile to the bin table by COORDINATE, not by row order, so a future
+    # cooltools change to how it splits bins cannot silently re-open the defect above.
+    _bin_table = clr.bins()[:]
+    _bin_table = _bin_table[_bin_table["chrom"].astype(str) == chrom].reset_index(drop=True)
+    prof = _bin_table[["chrom", "start", "end"]].merge(
+        prof[["start", "balanced"]], on="start", how="left"
+    )
     vals = prof["balanced"].to_numpy()
     pos = prof["start"].to_numpy()
     center = (start + end) // 2
@@ -849,8 +966,7 @@ def virtual_4c(
         vals = np.where(in_window, vals, np.nan)
     else:
         in_window = np.ones(vals.shape, dtype=bool)
-    all_bins = clr.bins()[:]
-    all_bins = all_bins[all_bins["chrom"].astype(str) == chrom].reset_index(drop=True)
+    all_bins = _bin_table
     weights = all_bins["weight"].to_numpy()
     mappable = ~np.isnan(weights)
     # the viewpoint's own bins are masked by cooltools deliberately (self-contact), so
@@ -895,7 +1011,14 @@ def virtual_4c(
             {"start": int(pos[i]), "balanced": _finite(usable[i])} for i in idx
         ],
         "profile_note": (
-            f"{n} mappable bins are reported"
+            (
+                f"Your viewpoint {chrom}:{snapped_from[0]:,}-{snapped_from[1]:,} does not sit "
+                f"on the {bs:,} bp bin grid, so it was widened to the bins it overlaps "
+                f"({chrom}:{start:,}-{end:,}) - a contact matrix has no finer anchor. "
+                if snapped_from
+                else ""
+            )
+            + f"{n} mappable bins are reported"
             + (
                 f"; downsampled to every {_ordinal(stride)} point for transport"
                 if stride > 1
@@ -989,7 +1112,7 @@ def expected_observed(
         slope = _finite(np.polyfit(np.log10(sl["dist_bp"]), np.log10(sl["expected"]), 1)[0])
         fit_range = [int(sl["dist_bp"].min()), int(sl["dist_bp"].max())]
 
-    n_bins = (end - start) // binsize
+    n_bins = _bins_spanned(clr, f"{chrom}:{start}-{end}")
     out: dict = {
         "region": f"{chrom}:{start:,}-{end:,}",
         "resolution_used": binsize,

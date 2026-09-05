@@ -451,24 +451,52 @@ def test_user_can_supply_a_view_and_a_phasing_track(tmp_path, two_chromosome_coo
     out = insulation_tads(file=f, view=str(view), region="cA:0-500,000", top_n=1)
     assert "supplied view" in out["view"]
 
+    # This track used to be uniform random noise, and the tool returned a confident A/B
+    # call from it - so the test asserted the very defect a later round found: a track that
+    # correlates with nothing still oriented the eigenvector. A phasing track earns its
+    # orientation by tracking compartment identity, so the one here does: it is built from
+    # the file's own unphased E1, which is what a real GC or gene-density track approximates.
+    unphased = compartments(file=f, view=str(view))
+    assert "UNPHASED" in unphased["sign_convention"]
+    e1 = compartments(file=f, view=str(view), region="cA:0-600,000")["E1_track"]
+    by_start = {int(pt["start"]): pt["E1"] for pt in e1 or []}
+
     rng = np.random.default_rng(0)
     frames = []
     for chrom, n in (("cA", 60), ("cB", 40)):  # the track must cover every view region
+        starts = np.arange(n) * 10_000
+        if chrom == "cA":
+            base = np.array([by_start.get(int(x)) or 0.0 for x in starts], dtype=float)
+        else:
+            base = np.zeros(n)
+        value = 0.45 + 0.1 * base + rng.normal(0, 0.005, n)
         frames.append(
             pd.DataFrame(
-                {
-                    "chrom": [chrom] * n,
-                    "start": np.arange(n) * 10_000,
-                    "end": (np.arange(n) + 1) * 10_000,
-                    "GC": rng.uniform(0.3, 0.6, n),
-                }
+                {"chrom": [chrom] * n, "start": starts,
+                 "end": starts + 10_000, "GC": value}
             )
         )
     track = tmp_path / "gc.tsv"
     pd.concat(frames).to_csv(track, sep="\t", index=False)
     phased = compartments(file=f, view=str(view), phasing_track=str(track), region="cA:0-300,000")
-    assert phased["region_call"] in {"A", "B"}  # a real call, not "unphased"
+    assert phased["region_call"] in {"A", "B"}, phased["sign_convention"]
     assert "UNPHASED" not in phased["sign_convention"]
+    assert "Pearson r" in phased["sign_convention"]
+
+    # and the counterpart the fix exists for: noise orients nothing, so nothing is called
+    noise = tmp_path / "noise.tsv"
+    pd.concat(
+        [
+            pd.DataFrame(
+                {"chrom": [c] * n, "start": np.arange(n) * 10_000,
+                 "end": (np.arange(n) + 1) * 10_000,
+                 "GC": np.random.default_rng(1).uniform(0.3, 0.6, n)}
+            )
+            for c, n in (("cA", 60), ("cB", 40))
+        ]
+    ).to_csv(noise, sep="\t", index=False)
+    guessed = compartments(file=f, view=str(view), phasing_track=str(noise), region="cA:0-300,000")
+    assert guessed["region_call"] == "unphased", guessed["sign_convention"]
 
 
 def test_phasing_track_not_covering_the_view_is_an_agent_readable_error(
@@ -1033,3 +1061,57 @@ def test_raw_only_request_says_why_there_is_no_matrix():
     # and a normal balanced call still returns the matrix with no spurious note
     ok = contacts_at_locus(region="chr17:50,000,000-50,200,000", resolution=10_000)
     assert ok["balanced_matrix"] is not None and ok.get("note") is None
+
+
+def test_a_track_that_orients_nothing_does_not_produce_an_ab_call(tmp_path):
+    """cooltools flips E1 to a positive correlation with the track WHATEVER that is.
+
+    Binning, coverage and density guards all pass on a track whose values have been shuffled
+    - same bins, same numbers, relationship destroyed - and the tool used to return the
+    repo's own documented A block as B, with sign consistency 1.0 and no caveat anywhere.
+    A tool that refuses to guess without a track must not guess with a useless one.
+    """
+    import numpy as np
+    import pandas as pd
+
+    from hic_mcp.data import data_dir
+
+    src = pd.read_csv(data_dir() / "gc_100kb.tsv", sep="\t")
+    shuffled = src.copy()
+    col = shuffled.columns[3]
+    shuffled[col] = np.random.default_rng(0).permutation(shuffled[col].to_numpy())
+    track = tmp_path / "shuffled_gc.tsv"
+    shuffled.to_csv(track, sep="\t", index=False)
+
+    region = "chr17:50,100,000-51,100,000"  # the documented A block
+    good = compartments(region=region, resolution=100_000)
+    assert good["region_call"] == "A"
+    assert "Pearson r" in good["sign_convention"]
+
+    bad = compartments(region=region, resolution=100_000, phasing_track=str(track))
+    assert bad["region_call"] == "unphased", bad["sign_convention"]
+    assert "UNPHASED" in bad["sign_convention"]
+    assert "Pearson r" in bad["sign_convention"]  # the number that justified the refusal
+
+    # and the whole-file survey: an A fraction is a claim the sign has to earn
+    whole_bad = compartments(resolution=100_000, phasing_track=str(track))
+    assert whole_bad["A_fraction_of_file"] is None
+    assert whole_bad["positive_E1_fraction_of_file"] is not None
+    whole_good = compartments(resolution=100_000)
+    assert whole_good["A_fraction_of_file"] is not None
+
+
+@pytest.mark.parametrize("balanced", [True, False])
+def test_the_sparse_road_names_itself_whichever_flag_the_caller_passed(balanced):
+    """This server discloses which road produced a number - it used to go silent on one.
+
+    With balanced=False the response attributed the missing matrix entirely to the caller's
+    flag, when the bin cap was the operative reason and the statistics had come from the
+    sparse pixel table rather than a dense fetch.
+    """
+    out = contacts_at_locus(region="chr17:50,000,000-53,000,000", resolution=10_000,
+                            balanced=balanced)
+    assert out["balanced_matrix"] is None
+    assert "sparse pixel table" in out["note"], out["note"]
+    if not balanced:
+        assert "you passed balanced=false" in out["note"]

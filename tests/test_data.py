@@ -56,13 +56,26 @@ def test_single_resolution_cool(tiny_unbalanced_cool):
 
 
 def test_region_parse_contract_matches_cooler():
-    """Contract-drift guard: any region we accept, cooler's own fetch accepts too."""
+    """Contract-drift guard: any region we accept, cooler's own fetch accepts too.
+
+    This used to assert `ceil((end-start)/res)` - the SAME span-quotient formula the code
+    had wrong - so it agreed with the bug on every aligned region and was blind to the class
+    entirely. It now asserts cooler's actual rule: every bin the region overlaps, which is
+    what fetch returns. Unaligned regions are included deliberately.
+    """
     p = resolve_input_path(None)
     clr = open_matrix(p, 100_000, default=100_000)
-    for region in ["chr17", "chr17:1,000,000-2,000,000", "chr17:0-100000"]:
-        chrom, start, end = parse_region_checked(clr, region)
+    regions = [
+        "chr17", "chr17:1,000,000-2,000,000", "chr17:0-100000",
+        "chr17:1,050,000-2,050,000",   # unaligned at both ends
+        "chr17:1,000,001-2,000,000",   # 1 bp off the grid
+        "chr17:1,050,000-1,060,000",   # wholly inside one bin
+    ]
+    for region in regions:
+        parse_region_checked(clr, region)
         m = clr.matrix(balance=False).fetch(region)
-        assert m.shape[0] == -(-(end - start) // 100_000)
+        lo, hi = clr.extent(region.replace(",", ""))
+        assert m.shape[0] == hi - lo, region
 
 
 def test_region_errors_are_agent_readable():
@@ -135,3 +148,34 @@ def test_missing_default_resolution_falls_to_the_nearest_coarser(tmp_path):
     assert open_matrix(path, None, default=100_000).binsize == 50_000
     # insulation's default is 10 kb: present, so exactly that
     assert open_matrix(path, None, default=10_000).binsize == 10_000
+
+
+def test_a_foreign_file_named_like_the_demo_is_not_the_demo(tmp_path):
+    """Identity is the file, not its name.
+
+    is_demo() gates the is_bundled_demo field, the bundled chr17 arm view and the bundled GC
+    phasing track. Matching on filename alone handed a foreign file a chr17 viewframe it has
+    no chromosomes for - which surfaced to the agent as a bare cooltools ValueError described
+    as a bug in this server - and reported it as the bundled demo beside an empty provenance.
+    """
+    import numpy as np
+    import pandas as pd
+
+    from hic_mcp.data import DEMO_FILENAME, is_demo
+
+    n = 80
+    bins = pd.DataFrame(
+        {"chrom": "cA", "start": np.arange(n) * 10_000, "end": (np.arange(n) + 1) * 10_000}
+    )
+    i, j = np.triu_indices(n)
+    c = np.random.default_rng(3).poisson(60.0 / (1 + (j - i))).astype(int)
+    k = c > 0
+    impostor = tmp_path / DEMO_FILENAME
+    cooler.create_cooler(
+        str(impostor),
+        bins,
+        pd.DataFrame({"bin1_id": i[k], "bin2_id": j[k], "count": c[k]}),
+    )
+    assert impostor.name == DEMO_FILENAME  # the name matches exactly
+    assert is_demo(impostor) is False       # the file does not
+    assert is_demo(demo_path()) is True     # and the real one still does

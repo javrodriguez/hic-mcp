@@ -32,7 +32,16 @@ def demo_path() -> Path:
 
 
 def is_demo(path: Path) -> bool:
-    return path.name == DEMO_FILENAME
+    """Identity is the file on disk, never its name.
+
+    This gates three things - the is_bundled_demo field, the bundled chr17 arm view and the
+    bundled GC phasing track - so a name match would hand a foreign file a chr17 viewframe it
+    has no chromosomes for, and report it as the bundled demo besides.
+    """
+    try:
+        return path.resolve() == demo_path().resolve()
+    except OSError:  # an unresolvable path is, by definition, not the bundled file
+        return False
 
 
 def resolve_input_path(file: str | None) -> Path:

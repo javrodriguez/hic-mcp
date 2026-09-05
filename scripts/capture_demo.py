@@ -44,10 +44,17 @@ TOOLS = (
 )
 
 # Envelope records keep only these fields; everything else in them is host-specific.
+# `tools` is deliberately NOT kept whole: the init record lists the operator's entire local
+# agent-tool inventory, most of which has nothing to do with this project and some of which
+# is not part of a stock install. That is machine-specific configuration of exactly the kind
+# this allowlist exists to strip, and it is why re-running this script elsewhere would not
+# reproduce "the same shape" the demo README promises. Only this server's own tools evidence
+# anything about this server, so only those are kept - see keep_hic_tools_only().
 ENVELOPE_KEEP = {
     "type", "subtype", "mcp_servers", "model", "is_error",
-    "num_turns", "result", "tools",
+    "num_turns", "result",
 }
+MCP_TOOL_PREFIX = "mcp__hic-mcp__"
 # A recorded session must not carry any of these into the repository.
 LEAK_PATTERNS = [r"/Users/", r"/home/[a-z]", r"C:\\\\Users", r"cc-socks", r"\.claude/projects"]
 
@@ -89,7 +96,13 @@ def clean(records: list[dict]) -> list[dict]:
         if rec.get("type") in ("assistant", "user"):
             out.append(rec)  # verbatim: the conversation itself
         else:
-            out.append({k: v for k, v in rec.items() if k in ENVELOPE_KEEP})
+            kept = {k: v for k, v in rec.items() if k in ENVELOPE_KEEP}
+            tools = rec.get("tools")
+            if isinstance(tools, list):
+                kept["tools"] = [
+                    t for t in tools if isinstance(t, str) and t.startswith(MCP_TOOL_PREFIX)
+                ]
+            out.append(kept)
     return out
 
 
