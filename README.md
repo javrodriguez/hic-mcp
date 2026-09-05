@@ -44,17 +44,41 @@ Real output from the bundled data — the entire response to `insulation_tads(re
   "region": "chr17:65,000,000-67,000,000",
   "resolution_used": 10000,
   "view": "chr17 p/q arms (bundled)",
-  "windows_bp": [100000, 250000, 500000],
+  "windows_bp": [
+    100000,
+    250000,
+    500000
+  ],
   "ranked_by": "boundary_strength at the 250000 bp window - top_boundaries lists ONLY boundaries called at that window (capped at top_n), so it is a subset of boundary_counts_per_window, whose other entries count different populations",
-  "boundary_counts_per_window": {"100000": 5, "250000": 4, "500000": 3},
-  "balanced": true,
-  "method": "cooltools.insulation (diamond insulation score; Li threshold boundary calls)",
+  "boundary_counts_per_window": {
+    "100000": 5,
+    "250000": 4,
+    "500000": 3
+  },
   "top_boundaries": [
-    {"locus": "chr17:66,180,000-66,190,000", "strength": 2.76292,
-     "log2_insulation": -1.63746, "windows_detected": [100000, 250000, 500000]},
-    {"locus": "chr17:66,680,000-66,690,000", "strength": 1.72627,
-     "log2_insulation": -1.1018, "windows_detected": [100000, 250000]}
-  ]
+    {
+      "locus": "chr17:66,180,000-66,190,000",
+      "strength": 2.76292,
+      "log2_insulation": -1.63746,
+      "windows_detected": [
+        100000,
+        250000,
+        500000
+      ]
+    },
+    {
+      "locus": "chr17:66,680,000-66,690,000",
+      "strength": 1.72627,
+      "log2_insulation": -1.1018,
+      "windows_detected": [
+        100000,
+        250000
+      ]
+    }
+  ],
+  "balanced": true,
+  "scale_note": null,
+  "method": "cooltools.insulation (diamond insulation score; Li threshold boundary calls). Returns the called boundaries and their scores, not the full per-bin insulation track."
 }
 ```
 

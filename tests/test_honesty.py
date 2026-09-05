@@ -161,7 +161,12 @@ def test_readme_sample_output_is_what_the_code_actually_returns():
     # the whole response, top level included: the block once dropped `region` and
     # `boundary_counts_per_window` while every per-boundary field matched, because
     # this check only ever looked inside the boundaries
-    live_shown = {k: v for k, v in live.items() if v is not None}
+    # the client sees the response MODEL, nulls included - comparing against the raw
+    # dict with nulls stripped is what let the block omit scale_note while claiming
+    # to be "the entire response, nothing removed"
+    from hic_mcp import models
+
+    live_shown = json.loads(models.InsulationTads(**live).model_dump_json())
     assert set(claimed) == set(live_shown), (
         f"README block and live response differ at the top level: "
         f"missing {sorted(set(live_shown) - set(claimed))}, "

@@ -40,6 +40,13 @@ COMPARTMENT_MEMORY_CAP_GB = 4.0  # eigs_cis densifies per region; refuse before 
 DENSE_FETCH_CAP_GB = 0.5  # above this, contacts_at_locus answers from sparse pixels instead
 
 
+def _ordinal(n: int) -> str:
+    """2 -> '2nd'. The naive f"{n}th" produced agent-facing text reading 'every 2th'."""
+    if 10 <= n % 100 <= 20:
+        return f"{n}th"
+    return f"{n}{ {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th') }".replace(" ", "")
+
+
 def _finite(x: float) -> float | None:
     """Round to 6 SIGNIFICANT figures, not 6 decimals.
 
@@ -47,6 +54,41 @@ def _finite(x: float) -> float | None:
     a P(s) curve into a run of identical constants.
     """
     return float(f"{float(x):.6g}") if np.isfinite(x) else None
+
+
+def _dense_cells_from_pixels(clr: Cooler, balance: bool, r1: str, r2: str, symmetric: bool):
+    """The pixels that fill the dense r1 x r2 rectangle, expanded from the stored triangle.
+
+    cooler stores one triangle, and a stored pixel (i,j) fills two dense cells: (i,j) and
+    (j,i). Fetching one orientation therefore under-reports any rectangle not wholly above
+    the diagonal - it returned nothing for a descending order and undercounted overlapping
+    regions by 16%. For a SYMMETRIC request the caller wants the upper triangle once for
+    the contact total, but the full square for cell counts and means, so both are returned.
+    """
+    import pandas as pd
+
+    forward = clr.matrix(balance=balance, as_pixels=True).fetch(r1, r2)
+    if symmetric:
+        upper = forward[forward["bin1_id"] <= forward["bin2_id"]]
+        return upper, upper[upper["bin1_id"] == upper["bin2_id"]], None
+    reverse = clr.matrix(balance=balance, as_pixels=True).fetch(r2, r1)
+    shared = set(
+        zip(
+            reverse.loc[reverse["bin1_id"] == reverse["bin2_id"], "bin1_id"],
+            reverse.loc[reverse["bin1_id"] == reverse["bin2_id"], "bin2_id"],
+            strict=True,
+        )
+    )
+    if shared and len(forward):
+        dup = np.array(
+            [
+                (i, j) in shared
+                for i, j in zip(forward["bin1_id"], forward["bin2_id"], strict=True)
+            ],
+            dtype=bool,
+        )
+        forward = forward[~dup]
+    return pd.concat([forward, reverse], ignore_index=True), None, True
 
 
 def _resolve_view(path, view: str | None, clr: Cooler | None = None):
@@ -284,23 +326,23 @@ def contacts_at_locus(
         # only the upper triangle, so a symmetric square's cell counts and sums must be
         # mirrored - counting stored pixels against the full square would halve
         # nonzero_fraction, and averaging over stored pixels alone would inflate the mean.
-        # cooler stores only the upper triangle: an as_pixels fetch of a block lying
-        # entirely BELOW the diagonal returns zero rows, while the dense fetch mirrors
-        # it - so descending region order silently produced "no contacts". Every
-        # statistic here is symmetric under transpose, so fetch in ascending order.
-        fr1, fr2 = (r1, r2)
-        if int(clr.bins().fetch(r1).index[0]) > int(clr.bins().fetch(r2).index[0]):
-            fr1, fr2 = r2, r1
-        pix = clr.matrix(balance=False, as_pixels=True).fetch(fr1, fr2)
-        if region2 is None:
-            upper = pix[pix["bin1_id"] <= pix["bin2_id"]]
-            on_diag = int((upper["bin1_id"] == upper["bin2_id"]).sum())
-            raw_sum = int(upper["count"].sum()) if len(upper) else 0
-            nonzero_cells = 2 * len(upper) - on_diag
+        # cooler stores ONE triangle: a stored pixel (i,j) fills two dense cells, (i,j)
+        # and (j,i). A single as_pixels fetch therefore under-reports any rectangle that
+        # is not wholly above the diagonal - it returned nothing at all for a descending
+        # order, and undercounted overlapping regions by 16%. Both orientations are
+        # fetched and combined, minus the diagonal they share, which is exact for every
+        # shape: disjoint, overlapping, identical, and either order.
+        symmetric = region2 is None
+        pix, diag, _ = _dense_cells_from_pixels(clr, False, r1, r2, symmetric)
+        raw_max = int(pix["count"].max()) if len(pix) else 0
+        if symmetric:
+            # contact total: the upper triangle once - the file's own convention.
+            # cell count: the full square, so mirror the off-diagonal pixels.
+            raw_sum = int(pix["count"].sum()) if len(pix) else 0
+            nonzero_cells = 2 * len(pix) - len(diag)
         else:
             raw_sum = int(pix["count"].sum()) if len(pix) else 0
             nonzero_cells = len(pix)
-        raw_max = int(pix["count"].max()) if len(pix) else 0
         nonzero_fraction = round(nonzero_cells / max(1, n1 * n2), 4)
         raw = None
     else:
@@ -323,21 +365,30 @@ def contacts_at_locus(
     }
     if out_trans_note:
         out["note"] = out_trans_note
+    if not use_weights and out_trans_note is None:
+        # the tool description promises a matrix for small windows; when the caller asked
+        # for raw counts (or the file has no weights) there is simply nothing balanced to
+        # return, and silence reads as a missing result rather than a deliberate one
+        out["note"] = (
+            "No balanced values were requested or available, so balanced_matrix is null "
+            "and only raw counts are reported"
+            + ("" if balanced else " (you passed balanced=false)")
+            + "."
+            if not _weights_present(clr) or not balanced
+            else out.get("note")
+        )
     # always present, null when not computed - an absent key reads as "not applicable"
     # in one client and "missing" in another
     out.setdefault("balanced_mean", None)
     out.setdefault("balanced_max", None)
     out.setdefault("balanced_matrix", None)
     if use_weights and sparse_mode:
-        bpix = clr.matrix(balance=True, as_pixels=True).fetch(fr1, fr2)
+        bpix, bdiag, _ = _dense_cells_from_pixels(clr, True, r1, r2, symmetric)
         bvals = bpix["balanced"].to_numpy()
         finite = np.isfinite(bvals)
-        if region2 is None:
-            b1 = bpix["bin1_id"].to_numpy()
-            b2 = bpix["bin2_id"].to_numpy()
-            upper_sum = float(bvals[finite & (b1 <= b2)].sum())
-            diag_sum = float(bvals[finite & (b1 == b2)].sum())
-            total = 2 * upper_sum - diag_sum  # mirror the stored triangle
+        if symmetric:
+            dvals = bdiag["balanced"].to_numpy()
+            total = 2 * float(bvals[finite].sum()) - float(dvals[np.isfinite(dvals)].sum())
         else:
             total = float(bvals[finite].sum())
         # the dense road averages over every cell that HAS a balanced value, i.e. cells
@@ -497,7 +548,11 @@ def insulation_tads(
         "boundary_counts_per_window": counts,
         "top_boundaries": boundaries,
         "balanced": True,
-        "method": "cooltools.insulation (diamond insulation score; Li threshold boundary calls)",
+        "method": (
+            "cooltools.insulation (diamond insulation score; Li threshold boundary calls). "
+            "Returns the called boundaries and their scores, not the full per-bin "
+            "insulation track."
+        ),
     }
     if min(windows) > max(CLASSIC_TAD_WINDOWS):
         out["scale_note"] = (
@@ -841,7 +896,11 @@ def virtual_4c(
         ],
         "profile_note": (
             f"{n} mappable bins are reported"
-            + (f"; downsampled to every {stride}th point for transport" if stride > 1 else "")
+            + (
+                f"; downsampled to every {_ordinal(stride)} point for transport"
+                if stride > 1
+                else ""
+            )
             + ". One convention throughout: a mappable bin with no contacts is a genuine "
             "zero, in the points and in the band means alike; ICE-filtered bins and the "
             "viewpoint's own bin (masked by cooltools) carry no measurement and appear in "
@@ -854,8 +913,16 @@ def virtual_4c(
         ),
         "coverage_note": (
             (
-                f"Both the profile and the band means are limited to {window_bp:,} bp "
-                "around the viewpoint, as requested."
+                f"Both the profile and the band means are limited to "
+                f"{min(window_bp, bands[-1][1]):,} bp around the viewpoint"
+                + (
+                    f" (you asked for {window_bp:,} bp; the bands themselves stop at "
+                    f"{bands[-1][1]:,} bp)"
+                    if window_bp > bands[-1][1]
+                    else ", as requested"
+                )
+                + ". A band straddling the limit keeps its full label but covers only "
+                "the part inside it."
             )
             if window_bp is not None
             else (
@@ -945,7 +1012,7 @@ def expected_observed(
         "curve_note": (
             f"The curve covers {len(curve)} measured separations, of which {len(sl)} fall "
             f"in the fitted range; the points listed above are every "
-            f"{max(1, len(curve) // 100)}th of the curve, for transport."
+            f"{_ordinal(max(1, len(curve) // 100))} of the curve, for transport."
             if len(curve) > 100
             else f"All {len(curve)} measured separations are listed; {len(sl)} were fitted."
         ),

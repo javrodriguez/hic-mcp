@@ -885,8 +885,16 @@ def test_contacts_sparse_and_dense_roads_agree():
 @pytest.mark.parametrize(
     "region,region2",
     [
+        # Every shape a caller can ask for. Three of these were added after a fix that
+        # was checked across all six shapes but on one field only, while this sweep
+        # checked all five fields but on three shapes - so each guard missed the other's
+        # blind spot and a broken refactor went green in both.
         ("chr17:50,000,000-50,500,000", None),          # symmetric square
-        ("chr17:50,000,000-50,300,000", "chr17:60,000,000-60,300,000"),  # off-diagonal block
+        ("chr17:50,000,000-50,300,000", "chr17:60,000,000-60,300,000"),  # disjoint, ascending
+        ("chr17:60,000,000-60,300,000", "chr17:50,000,000-50,300,000"),  # disjoint, DESCENDING
+        ("chr17:50,000,000-50,400,000", "chr17:50,200,000-50,600,000"),  # OVERLAPPING
+        ("chr17:50,000,000-50,300,000", "chr17:50,000,000-50,300,000"),  # IDENTICAL
+        ("chr17:50,000,000-50,300,000", "chr17:50,300,000-50,600,000"),  # adjacent
         ("chr17:23,000,000-23,300,000", None),          # fully ICE-filtered
     ],
 )
@@ -965,3 +973,63 @@ def test_ranked_by_discloses_that_it_filters():
     assert "ONLY" in out["ranked_by"] and "subset" in out["ranked_by"]
     listed = len(out["top_boundaries"])
     assert listed <= out["boundary_counts_per_window"][str(out["windows_bp"][1])]
+
+
+# --- v2 round 3: the shape axis the parity tests never covered ----------------
+
+
+@pytest.mark.parametrize(
+    "label,region,region2",
+    [
+        ("single region", "chr17:50,000,000-53,000,000", None),
+        ("overlapping", "chr17:50,000,000-53,000,000", "chr17:52,000,000-55,000,000"),
+        ("identical pair", "chr17:50,000,000-53,000,000", "chr17:50,000,000-53,000,000"),
+        ("disjoint ascending", "chr17:50,000,000-53,000,000", "chr17:60,000,000-63,000,000"),
+        ("disjoint descending", "chr17:60,000,000-63,000,000", "chr17:50,000,000-53,000,000"),
+        ("adjacent", "chr17:50,000,000-53,000,000", "chr17:53,000,000-56,000,000"),
+    ],
+)
+def test_sparse_road_equals_cooler_dense_truth(label, region, region2):
+    """Checked against cooler itself, not against our own dense branch.
+
+    cooler stores ONE triangle and a stored pixel fills two dense cells. Fetching one
+    orientation undercounted overlapping regions by 16% and identical ones by 20%,
+    while the response's own `counting` field promised the opposite convention.
+    """
+    import numpy as np
+
+    from hic_mcp.data import open_matrix, resolve_input_path
+
+    clr = open_matrix(resolve_input_path(None), 10_000, default=10_000)
+    dense = np.nan_to_num(clr.matrix(balance=False).fetch(region, region2 or region))
+    truth = int(np.triu(dense).sum()) if region2 is None else int(dense.sum())
+
+    kwargs = {"region": region, "resolution": 10_000}
+    if region2:
+        kwargs["region2"] = region2
+    assert contacts_at_locus(**kwargs)["raw_contacts_sum"] == truth, label
+
+
+def test_downsampling_ordinals_read_as_english():
+    """Agent-facing text once said "every 2th of the curve"."""
+    note = expected_observed(region="chr17:5,000,000-7,000,000", resolution=100_000)["curve_note"]
+    assert "2th" not in note and "3th" not in note and "1th" not in note
+
+
+def test_coverage_note_never_claims_more_than_the_bands_cover():
+    """It once reported a 20 Mb window while the bands stop at 10 Mb."""
+    out = virtual_4c(viewpoint="chr17:63,000,000-63,100,000", window_bp=20_000_000)
+    assert "10,000,000 bp" in out["coverage_note"]
+    assert out["distance_bands_cover_bp"] == [0, 10_000_000]
+
+
+def test_raw_only_request_says_why_there_is_no_matrix():
+    """The tool promises a matrix for small windows; silence reads as a missing result."""
+    out = contacts_at_locus(
+        region="chr17:50,000,000-50,200,000", resolution=10_000, balanced=False
+    )
+    assert out["balanced_matrix"] is None
+    assert "balanced=false" in out["note"].lower()
+    # and a normal balanced call still returns the matrix with no spurious note
+    ok = contacts_at_locus(region="chr17:50,000,000-50,200,000", resolution=10_000)
+    assert ok["balanced_matrix"] is not None and ok.get("note") is None
