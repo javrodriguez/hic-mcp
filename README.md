@@ -191,17 +191,20 @@ The test suite asserts known measured results — a specific boundary locus, com
 Many commit bodies in this repository refer to "rounds", "evaluators" and "findings". They are not
 noise, and this is what they mean.
 
-Every change here was graded by **three independent fresh-context evaluators per round**, each
-reading a clean clone blind, each given a byte-identical prompt, each writing its report before
-anything was fixed. Thirteen rounds ran: eight against the first design, then five more against a
-redesigned surface with a stricter stopping rule. Across them, **120 unique findings** were drawn
+Every change here was graded by **independent fresh-context evaluators**, each reading a clean
+clone blind, each given a byte-identical prompt, each writing its report before anything was
+fixed. Thirteen rounds ran: eight against the first design with **three evaluators per round**,
+then five more against a frozen surface with **two per round** — dropped to two on the evidence
+that every material finding in the last three rounds of the first design had been raised by at
+least two of the three. Across them, **120 unique findings** were drawn
 from 159 raw evaluator reports — the gap is the same defect found independently by two or three
 evaluators. Every one was reproduced and fixed at root. No finding was overridden or downgraded.
 
-**The stopping rule was never met, and that is worth saying plainly.** "Done" required two
-consecutive rounds where all three evaluators returned clean. No round ever came back clean. The
-loop was stopped by a judgement call, not by convergence, so this repository is *not* certified by
-its own standard.
+**The stopping rule was never met, and that is worth saying plainly.** The first design required
+two consecutive rounds where every evaluator returned clean; the second relaxed the *shape* but
+not the bar — two consecutive rounds with no MATERIAL finding on a frozen surface, minors still
+fixed. Neither was ever reached. The loop was stopped by a judgement call, not by convergence, so
+this repository is *not* certified by its own standard.
 
 That does not mean defects are outstanding — there is no known unfixed defect. It means each round
 kept finding a new instance of one class: **a road the test corpus never walks**. Region order,
